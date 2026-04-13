@@ -35,13 +35,17 @@ Single file: `app.py`. One class: `App(ctk.CTk)`.
 [Video URL label]
 [URL entry field ──────────────────────────────] [Paste]
 [Quality ▼]  [Save to: ~/Desktop ────────────] [Browse…]
+[Cookies from browser: ▼]   [☐ Prefer H.264]
+  "Use your browser's login to reach private, members-only, or age-restricted videos."
+[☐ Clip section]   [Start  e.g. 1:23]   [End  e.g. 2:45]    (entries hidden until toggle is on)
+  "Download only a portion of the video — leave a field blank to run to the start or end."
 [Download / Cancel button (full width, 44px)]
 [Progress bar]
 [Filename label — wraps at WRAP=532px]
 [Speed / ETA / state — single line]
 ```
 
-Window: 580×360, fixed size. Layout constants defined at module top: `WINDOW_W`, `SIDE_PAD`, `CTK_LABEL_PAD`, `WRAP`.
+Window: 580×500, fixed size. Layout constants defined at module top: `WINDOW_W`, `SIDE_PAD`, `CTK_LABEL_PAD`, `WRAP`.
 
 ## Quality Options
 
@@ -56,6 +60,22 @@ Window: 580×360, fixed size. Layout constants defined at module top: `WINDOW_W`
 | Audio Only (MP3)  | `bestaudio/best` + FFmpegExtractAudio @ 192kbps           |
 
 Video formats merged to mp4. Audio-only skips the merge step.
+
+When **Prefer H.264** is checked, a parallel `QUALITY_OPTIONS_H264` map is used. Each entry has the form `bestvideo[vcodec~=avc][height<=N]+bestaudio/bestvideo[height<=N]+bestaudio/best[height<=N]` — H.264 first, falls back to any codec at the same height, then to a single best file. Audio-only mode is not affected by the checkbox.
+
+## Optional Features (all opt-in)
+
+| Control              | Behavior                                                                 |
+|----------------------|--------------------------------------------------------------------------|
+| Cookies from browser | yt-dlp `cookiesfrombrowser=(browser.lower(),)` on probe + download       |
+| Prefer H.264         | Swap `QUALITY_OPTIONS` → `QUALITY_OPTIONS_H264` (no-op for audio)        |
+| Clip section         | `download_ranges=download_range_func(None, [(start, end)])` + `force_keyframes_at_cuts=True` |
+
+### Clip time parsing
+`_parse_time()` accepts `SS`, `MM:SS`, or `HH:MM:SS` (decimals allowed). Empty → `None`. Validation in `_start_download`: empty+empty → error; End ≤ Start → error; malformed → error quoting the bad token.
+
+### macOS notification
+`_notify(title, message)` shells out to `osascript -e 'display notification …'` with a 3-second timeout. Called from `_on_done()` only. All exceptions are swallowed and logged at debug level — notification failure can never interrupt the app.
 
 ## Key Implementation Details
 
@@ -110,8 +130,8 @@ Pinned in `requirements.txt`. To upgrade yt-dlp when a site breaks:
 
 ## NOTES
 See `NOTES/` for project history:
-- `decisions.md` — DEC-001 through DEC-016
-- `fixes.md` — FIX-001 through FIX-020
+- `decisions.md` — DEC-001 through DEC-020
+- `fixes.md` — FIX-001 through FIX-024
 - `errors.md` — ERR-001 through ERR-005
 
 ## CRITICAL Workflow Rule

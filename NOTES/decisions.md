@@ -85,3 +85,29 @@
 **Decision**: All three dependencies pinned to exact tested versions: `yt-dlp==2026.3.17`, `customtkinter==5.2.2`, `static-ffmpeg==3.0`.  
 **Why**: yt-dlp releases breaking changes regularly as platforms change their APIs. Unpinned = non-reproducible builds.  
 **Maintenance**: Run `.venv/bin/pip install --upgrade yt-dlp` when a site breaks, test, then update the pin.
+
+## DEC-017 — Cookies from browser dropdown
+**Date**: 2026-04-13  
+**Decision**: New `Cookies from browser` option menu on the cookie row (`None`, `Safari`, `Chrome`, `Firefox`). When not `None`, yt-dlp's `cookiesfrombrowser` option is set to `(browser_name.lower(),)` on both the playlist probe and the main download.  
+**Why**: Sites that gate content behind login (age-restricted, paywalled, region-locked) fail without cookies. Browser cookies is the lowest-friction way to authenticate — no file wrangling.  
+**Error handling**: Friendly error messages added for "Unable to load cookies" and general "cookies" substrings, directing the user to close the browser or set Cookies to None.
+
+## DEC-018 — macOS completion notification via osascript
+**Date**: 2026-04-13  
+**Decision**: `_on_done()` calls `_notify(title, message)` which shells out to `osascript -e 'display notification ... with title ...'`. Runs with a 3-second timeout and swallows all exceptions.  
+**Why**: Users often start a long download and switch away. A Notification Center banner surfaces completion without needing to bring the app forward. Using `osascript` avoids adding a dependency (no `pyobjc`).  
+**Permissions**: The first notification triggers macOS's permission prompt for "Script Editor" / the bundled app; subsequent notifications are silent if denied.  
+**Safety**: Notification failure never interrupts the download — all exceptions logged at `debug` level and swallowed.
+
+## DEC-019 — "Prefer H.264" checkbox for broader device compatibility
+**Date**: 2026-04-13  
+**Decision**: New checkbox in the cookie/options row. When checked, `QUALITY_OPTIONS_H264` (parallel format-string map) is used instead of the default `QUALITY_OPTIONS`. Each H.264 format string has a three-tier fallback: `bestvideo[vcodec~=avc]+bestaudio / bestvideo+bestaudio / best`. Audio-only mode is unaffected.  
+**Why**: VP9 and AV1 (default on YouTube for higher resolutions) don't play natively on older iPhones, iPads, Apple TVs, and many TV OSs. H.264/AVC is universally compatible but may fall back to a lower resolution when AVC isn't available at the requested height.  
+**Tradeoff**: Users may get a lower-resolution file than requested if AVC isn't available at the target height. The fallback chain ensures the download never fails purely because AVC is missing.
+
+## DEC-020 — Clip section: Start/End time fields with download_ranges
+**Date**: 2026-04-13  
+**Decision**: New "Clip section" checkbox reveals two `CTkEntry` fields (`Start`, `End`). Both are optional — at least one must be non-empty when the toggle is on. Times parse `SS`, `MM:SS`, or `HH:MM:SS`. Maps to yt-dlp's `download_ranges=download_range_func(None, [(start, end)])` plus `force_keyframes_at_cuts=True`.  
+**Why**: Users often want a specific segment (a clip from a long video, a single scene). Downloading the full video then trimming locally is slow and wastes disk.  
+**Validation**: Empty + empty → inline error. End ≤ Start → inline error. Invalid format → inline error quoting the offending token.  
+**Implementation note**: `_toggle_clip()` clears the Start/End fields when the toggle is turned off, so stale values don't leak into the next download.

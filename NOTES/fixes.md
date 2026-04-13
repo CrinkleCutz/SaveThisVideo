@@ -95,3 +95,19 @@
 ## FIX-020 — _save_dir stored as str, initialized from Path (S10)
 **Fix**: `self._save_dir` is now typed and stored as `Path` throughout. `_trunc_path()` accepts `Path`. `_browse()` assigns `Path(path)`. yt-dlp `outtmpl` uses `str(save_dir / "%(title)s.%(ext)s")`. `_on_done` and `_start_download` use `self._save_dir` directly.  
 **File**: `app.py:91, 152, 253`
+
+## FIX-021 — Added cookies-from-browser dropdown
+**Fix**: New `_cookies_var` StringVar and `CTkOptionMenu` on the cookie row. When not "None", yt-dlp's `cookiesfrombrowser` option is set in both `_probe_playlist` and `_worker`. Friendly error messages added for cookie-related failures.  
+**File**: `app.py:59, 172-183, 334-335, 402-403`
+
+## FIX-022 — macOS completion notification
+**Fix**: New `_notify(title, message)` helper that shells out to `osascript`. Called from `_on_done()` after a successful download. Uses `subprocess.run` with 3s timeout; all exceptions are caught and logged at debug level.  
+**File**: `app.py:108-120, 486-487`
+
+## FIX-023 — H.264 preference checkbox
+**Fix**: New `QUALITY_OPTIONS_H264` dict with parallel format strings that prefer AVC video. `_h264_var` BooleanVar drives a CTkCheckBox on the cookie row. Worker selects the H.264 format map when the flag is set and the quality is not Audio Only.  
+**File**: `app.py:42-52, 188-193, 309, 386-390`
+
+## FIX-024 — Clip section (Start/End time range)
+**Fix**: New Clip section toggle + Start/End CTkEntry fields (hidden until toggle is on). `_parse_time()` accepts SS, MM:SS, and HH:MM:SS. Worker passes the range through `yt_dlp.utils.download_range_func` with `force_keyframes_at_cuts=True`. Validates empty/empty, End ≤ Start, and malformed formats inline before dispatch.  
+**File**: `app.py:85-106, 196-229, 310-329, 424-425`

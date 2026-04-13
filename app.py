@@ -6,6 +6,7 @@ import logging.handlers
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import tkinter.filedialog as fd
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 import yt_dlp
+from yt_dlp.utils import download_range_func
 
 APP_VERSION = "1.0.0"
 
@@ -33,6 +35,17 @@ QUALITY_OPTIONS = {
     "480p":             "bestvideo[height<=480]+bestaudio/best[height<=480]",
     "360p":             "bestvideo[height<=360]+bestaudio/best[height<=360]",
     "Audio Only (MP3)": "bestaudio/best",
+}
+
+# Parallel format strings that prefer H.264 (avc) video, with fallback to any codec.
+# Audio-only is not listed here — it's always handled by the plain QUALITY_OPTIONS map.
+QUALITY_OPTIONS_H264 = {
+    "Best Available":   "bestvideo[vcodec~=avc]+bestaudio/bestvideo+bestaudio/best",
+    "4K (2160p)":       "bestvideo[vcodec~=avc][height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "1080p":            "bestvideo[vcodec~=avc][height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "720p":             "bestvideo[vcodec~=avc][height<=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "480p":             "bestvideo[vcodec~=avc][height<=480]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "360p":             "bestvideo[vcodec~=avc][height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]",
 }
 
 # Known yt-dlp error fragments → user-facing copy
@@ -77,6 +90,44 @@ def _friendly_error(raw: str) -> str:
     return first or "Download failed. Check the URL and try again."
 
 
+def _parse_time(raw: str) -> float | None:
+    """Parse 'SS', 'MM:SS', or 'HH:MM:SS' (decimals allowed) to seconds.
+    Returns None for empty input. Raises ValueError on malformed input.
+    """
+    s = raw.strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) > 3:
+        raise ValueError(raw)
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        raise ValueError(raw)
+    if any(n < 0 for n in nums):
+        raise ValueError(raw)
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[0] * 3600 + nums[1] * 60 + nums[2]
+
+
+def _notify(title: str, message: str) -> None:
+    """Post a macOS Notification Center notification via osascript. Never raises."""
+    def esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'display notification "{esc(message)}" with title "{esc(title)}"'
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=3, check=False,
+        )
+    except Exception as e:
+        log.debug("Notification failed: %s", e)
+
+
 def _setup_logging() -> None:
     """Attach a rotating file handler to the 'savethisvideo' logger.
     Logs are written to ~/Library/Logs/SaveThisVideo/app.log.
@@ -102,7 +153,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"SaveThisVideo {APP_VERSION}")
-        self.geometry(f"{WINDOW_W}x410")
+        self.geometry(f"{WINDOW_W}x500")
         self.resizable(False, False)
         self._save_dir: Path = Path.home() / "Desktop"
         self._downloading = False
@@ -166,9 +217,9 @@ class App(ctk.CTk):
         ctk.CTkButton(save_row, text="Browse…", width=80, height=36,
                       command=self._browse).grid(row=0, column=1, padx=(8, 0))
 
-        # ── Cookie row ────────────────────────────────────────────────────────
+        # ── Cookie + H.264 row ────────────────────────────────────────────────
         cookie_row = ctk.CTkFrame(self, fg_color="transparent")
-        cookie_row.grid(row=3, column=0, sticky="w", pady=(0, 10), **pad)
+        cookie_row.grid(row=3, column=0, sticky="w", pady=(0, 2), **pad)
 
         ctk.CTkLabel(cookie_row, text="Cookies from browser:",
                      font=ctk.CTkFont(size=12), text_color="gray").grid(
@@ -177,20 +228,66 @@ class App(ctk.CTk):
         self._cookies_var = ctk.StringVar(value="None")
         ctk.CTkOptionMenu(cookie_row, variable=self._cookies_var,
                           values=COOKIE_BROWSERS,
-                          width=120, height=30).grid(row=0, column=1)
+                          width=120, height=30).grid(row=0, column=1, padx=(0, 20))
+
+        self._h264_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(cookie_row, text="Prefer H.264",
+                        variable=self._h264_var,
+                        font=ctk.CTkFont(size=12),
+                        checkbox_width=18, checkbox_height=18).grid(row=0, column=2)
+
+        ctk.CTkLabel(
+            self,
+            text="Use your browser's login to reach private, members-only, or age-restricted videos.",
+            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
+            wraplength=WRAP, justify="left"
+        ).grid(row=4, column=0, sticky="w", pady=(0, 10), **pad)
+
+        # ── Clip row ──────────────────────────────────────────────────────────
+        clip_row = ctk.CTkFrame(self, fg_color="transparent")
+        clip_row.grid(row=5, column=0, sticky="w", pady=(0, 2), **pad)
+
+        self._clip_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(clip_row, text="Clip section",
+                        variable=self._clip_var, command=self._toggle_clip,
+                        font=ctk.CTkFont(size=12),
+                        checkbox_width=18, checkbox_height=18).grid(
+            row=0, column=0, padx=(0, 12))
+
+        self._start_var = ctk.StringVar()
+        self._start_entry = ctk.CTkEntry(
+            clip_row, textvariable=self._start_var,
+            placeholder_text="Start  e.g. 1:23", width=130, height=28)
+        self._start_entry.grid(row=0, column=1, padx=(0, 8))
+
+        self._end_var = ctk.StringVar()
+        self._end_entry = ctk.CTkEntry(
+            clip_row, textvariable=self._end_var,
+            placeholder_text="End  e.g. 2:45", width=130, height=28)
+        self._end_entry.grid(row=0, column=2)
+
+        self._start_entry.grid_remove()
+        self._end_entry.grid_remove()
+
+        ctk.CTkLabel(
+            self,
+            text="Download only a portion of the video — leave a field blank to run to the start or end.",
+            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
+            wraplength=WRAP, justify="left"
+        ).grid(row=6, column=0, sticky="w", pady=(0, 10), **pad)
 
         # ── Download button ───────────────────────────────────────────────────
         self._dl_btn = ctk.CTkButton(
             self, text="Download", height=44,
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._start_download)
-        self._dl_btn.grid(row=4, column=0, sticky="ew", pady=(0, 10), **pad)
+        self._dl_btn.grid(row=7, column=0, sticky="ew", pady=(0, 10), **pad)
         self._btn_fg    = self._dl_btn.cget("fg_color")
         self._btn_hover = self._dl_btn.cget("hover_color")
 
         self._progress = ctk.CTkProgressBar(self, height=8, progress_color="#2ecc71")
         self._progress.set(0)
-        self._progress.grid(row=5, column=0, sticky="ew", pady=(0, 10), **pad)
+        self._progress.grid(row=8, column=0, sticky="ew", pady=(0, 10), **pad)
 
         # Line 1 — filename (wraps naturally at WRAP; no truncation)
         self._filename_var = ctk.StringVar(value="")
@@ -198,14 +295,25 @@ class App(ctk.CTk):
             self, textvariable=self._filename_var,
             font=ctk.CTkFont(size=12), text_color="gray",
             wraplength=WRAP, justify="center")
-        self._filename_lbl.grid(row=6, column=0, padx=SIDE_PAD, pady=(0, 2))
+        self._filename_lbl.grid(row=9, column=0, padx=SIDE_PAD, pady=(0, 2))
 
         # Line 2 — speed / ETA / state (always a single short line)
         self._meta_var = ctk.StringVar(value="Ready")
         self._meta_lbl = ctk.CTkLabel(
             self, textvariable=self._meta_var,
             font=ctk.CTkFont(size=12), text_color="gray")
-        self._meta_lbl.grid(row=7, column=0, padx=SIDE_PAD, pady=(0, 16))
+        self._meta_lbl.grid(row=10, column=0, padx=SIDE_PAD, pady=(0, 16))
+
+    def _toggle_clip(self):
+        """Show or hide the Start/End entry fields when Clip section is toggled."""
+        if self._clip_var.get():
+            self._start_entry.grid()
+            self._end_entry.grid()
+        else:
+            self._start_entry.grid_remove()
+            self._end_entry.grid_remove()
+            self._start_var.set("")
+            self._end_var.set("")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -301,6 +409,27 @@ class App(ctk.CTk):
         quality_key = self._quality_var.get()
         save_dir    = self._save_dir
         cookies_key = self._cookies_var.get()
+        h264        = self._h264_var.get()
+
+        # Clip section: parse Start/End times if toggle is on
+        clip_range: tuple[float, float | None] | None = None
+        if self._clip_var.get():
+            try:
+                start_sec = _parse_time(self._start_var.get())
+                end_sec   = _parse_time(self._end_var.get())
+            except ValueError as e:
+                self._set_status(
+                    meta=f"Invalid clip time: {e.args[0]!r}. Use SS, MM:SS, or HH:MM:SS.",
+                    error=True)
+                return
+            if start_sec is None and end_sec is None:
+                self._set_status(
+                    meta="Clip section is on — enter a Start and/or End time.", error=True)
+                return
+            if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+                self._set_status(meta="Clip End must be after Start.", error=True)
+                return
+            clip_range = (start_sec or 0.0, end_sec)
 
         self._downloading = True
         self._last_saved_path = ""
@@ -312,10 +441,13 @@ class App(ctk.CTk):
         self._progress.set(0)
         self._set_status(filename="", meta="Starting…")   # Clear previous filename (S3)
 
-        log.info("Download started — quality=%s cookies=%s dest=%s", quality_key, cookies_key, save_dir)
+        log.info("Download started — quality=%s cookies=%s h264=%s clip=%s dest=%s",
+                 quality_key, cookies_key, h264, clip_range, save_dir)
 
         self._worker_thread = threading.Thread(
-            target=self._worker, args=(url, quality_key, save_dir, cookies_key), daemon=True)
+            target=self._worker,
+            args=(url, quality_key, save_dir, cookies_key, h264, clip_range),
+            daemon=True)
         self._worker_thread.start()
 
     # ── Playlist detection ────────────────────────────────────────────────────
@@ -362,9 +494,14 @@ class App(ctk.CTk):
 
     # ── Download worker (background thread) ───────────────────────────────────
 
-    def _worker(self, url: str, quality_key: str, save_dir: Path, cookies_key: str):
-        fmt      = QUALITY_OPTIONS[quality_key]
+    def _worker(self, url: str, quality_key: str, save_dir: Path,
+                cookies_key: str, h264: bool,
+                clip_range: tuple[float, float | None] | None):
         is_audio = quality_key == "Audio Only (MP3)"
+        if h264 and not is_audio:
+            fmt = QUALITY_OPTIONS_H264[quality_key]
+        else:
+            fmt = QUALITY_OPTIONS[quality_key]
 
         # Playlist check — probe before committing to download
         count = self._probe_playlist(url, cookies_key)
@@ -398,6 +535,9 @@ class App(ctk.CTk):
             ydl_opts["ffmpeg_location"] = ffmpeg
         if cookies_key != "None":
             ydl_opts["cookiesfrombrowser"] = (cookies_key.lower(),)
+        if clip_range is not None:
+            ydl_opts["download_ranges"] = download_range_func(None, [clip_range])
+            ydl_opts["force_keyframes_at_cuts"] = True
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -462,6 +602,8 @@ class App(ctk.CTk):
         else:
             self._set_status(meta=f"✓  Saved to {self._save_dir}")
         log.info("Download complete — file=%s", saved_name or "(unknown)")
+        _notify("Download complete",
+                saved_name if saved_name else f"Saved to {self._save_dir}")
 
     def _on_cancelled(self):
         self._reset()
