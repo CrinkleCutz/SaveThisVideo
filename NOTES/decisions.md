@@ -111,3 +111,10 @@
 **Why**: Users often want a specific segment (a clip from a long video, a single scene). Downloading the full video then trimming locally is slow and wastes disk.  
 **Validation**: Empty + empty → inline error. End ≤ Start → inline error. Invalid format → inline error quoting the offending token.  
 **Implementation note**: `_toggle_clip()` clears the Start/End fields when the toggle is turned off, so stale values don't leak into the next download.
+
+## DEC-021 — Avoid overwriting existing files by appending " (N)" suffix
+**Date**: 2026-04-13  
+**Decision**: Before the main download, the worker probes the URL's info dict (reusing the playlist-detection call — no extra network round-trip). For single videos, `_unique_outtmpl` computes `<sanitized-title>.<mp4|mp3>` via `yt_dlp.utils.sanitize_filename`, walks ` (1)`, ` (2)`, … until a free slot is found, and passes that literal path as `outtmpl` (with `%` → `%%` to defuse yt-dlp's template syntax).  
+**Why**: Re-downloading the same video would silently overwrite the previous copy. Users expect macOS Finder–style behavior where duplicates get a numbered suffix instead.  
+**Scope**: Only single-video downloads are deduped. Playlists keep the default `%(title)s.%(ext)s` template — per-entry dedup is complex and playlist downloads rarely overlap across sessions.  
+**Refactor**: `_probe_playlist` (returned just the count) replaced with `_probe_info` (returns the full info dict) since both features need the same probe result.

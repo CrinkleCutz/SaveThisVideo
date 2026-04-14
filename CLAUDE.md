@@ -75,6 +75,9 @@ When **Prefer H.264** is checked, a parallel `QUALITY_OPTIONS_H264` map is used.
 ### Clip time parsing
 `_parse_time()` accepts `SS`, `MM:SS`, or `HH:MM:SS` (decimals allowed). Empty → `None`. Validation in `_start_download`: empty+empty → error; End ≤ Start → error; malformed → error quoting the bad token.
 
+### Filename collision handling
+`_unique_outtmpl()` runs after `_probe_info()` and before the main download. For single videos, it sanitizes the title (`yt_dlp.utils.sanitize_filename`), adds `.mp4` or `.mp3`, and walks ` (1)`, ` (2)`, … until a free path exists in `save_dir`. The literal path is then used as `outtmpl` with `%` → `%%` escaping. Playlists keep the default `%(title)s.%(ext)s` template.
+
 ### macOS notification
 `_notify(title, message)` shells out to `osascript -e 'display notification …'` with a 3-second timeout. Called from `_on_done()` only. All exceptions are swallowed and logged at debug level — notification failure can never interrupt the app.
 
@@ -131,8 +134,8 @@ Pinned in `requirements.txt`. To upgrade yt-dlp when a site breaks:
 
 ## NOTES
 See `NOTES/` for project history:
-- `decisions.md` — DEC-001 through DEC-020
-- `fixes.md` — FIX-001 through FIX-024
+- `decisions.md` — DEC-001 through DEC-021
+- `fixes.md` — FIX-001 through FIX-025
 - `errors.md` — ERR-001 through ERR-005
 
 ## CRITICAL Workflow Rule

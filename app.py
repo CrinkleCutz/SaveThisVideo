@@ -15,7 +15,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 import yt_dlp
-from yt_dlp.utils import download_range_func
+from yt_dlp.utils import download_range_func, sanitize_filename
 
 APP_VERSION = "1.0.0"
 
@@ -456,11 +456,11 @@ class App(ctk.CTk):
             daemon=True)
         self._worker_thread.start()
 
-    # ── Playlist detection ────────────────────────────────────────────────────
+    # ── URL probe (playlist detection + title lookup) ─────────────────────────
 
-    def _probe_playlist(self, url: str, cookies_key: str) -> int | None:
-        """Return entry count if url resolves to a playlist, else None.
-        Runs synchronously on the worker thread.
+    def _probe_info(self, url: str, cookies_key: str) -> dict | None:
+        """Extract URL metadata (no download). Used for both playlist detection and
+        filename-collision checks. Runs synchronously on the worker thread.
         """
         opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist"}
         ffmpeg = _bundled_ffmpeg()
@@ -470,12 +470,32 @@ class App(ctk.CTk):
             opts["cookiesfrombrowser"] = (cookies_key.lower(),)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-            if info and info.get("_type") == "playlist":
-                return len(info.get("entries") or [])
+                return ydl.extract_info(url, download=False)
         except Exception:
-            pass
-        return None
+            return None
+
+    @staticmethod
+    def _unique_outtmpl(info: dict | None, save_dir: Path, is_audio: bool) -> str:
+        """Return an outtmpl that won't overwrite an existing file.
+        For a single video with a known title, returns a literal ' (N).ext' path
+        (with '%' escaped). For playlists or unknown titles, returns the default
+        '%(title)s.%(ext)s' template and lets yt-dlp handle naming.
+        """
+        default = str(save_dir / "%(title)s.%(ext)s")
+        if not info or info.get("_type") == "playlist":
+            return default
+        title = info.get("title")
+        if not title:
+            return default
+        ext = "mp3" if is_audio else "mp4"
+        safe = sanitize_filename(title, restricted=False)
+        candidate = save_dir / f"{safe}.{ext}"
+        n = 1
+        while candidate.exists():
+            candidate = save_dir / f"{safe} ({n}).{ext}"
+            n += 1
+        # Escape '%' so yt-dlp does not treat literal title chars as field markers.
+        return str(candidate).replace("%", "%%")
 
     def _ask_playlist(self, count: int) -> bool:
         """Show a playlist confirmation dialog on the main thread; block the worker until answered.
@@ -509,12 +529,15 @@ class App(ctk.CTk):
         else:
             fmt = QUALITY_OPTIONS[quality_key]
 
-        # Playlist check — probe before committing to download
-        count = self._probe_playlist(url, cookies_key)
-        if count is not None and count > 1:
-            if not self._ask_playlist(count):
+        # Probe URL info — used for both playlist detection and filename collision check
+        info = self._probe_info(url, cookies_key)
+        if info and info.get("_type") == "playlist":
+            count = len(info.get("entries") or [])
+            if count > 1 and not self._ask_playlist(count):
                 self.after(0, self._on_cancelled)
                 return
+
+        outtmpl = self._unique_outtmpl(info, save_dir, is_audio)
 
         postprocessors = []
         if is_audio:
@@ -526,7 +549,7 @@ class App(ctk.CTk):
 
         ydl_opts = {
             "format":              fmt,
-            "outtmpl":             str(save_dir / "%(title)s.%(ext)s"),
+            "outtmpl":             outtmpl,
             "merge_output_format": None if is_audio else "mp4",
             "postprocessors":      postprocessors,
             "progress_hooks":      [self._hook],

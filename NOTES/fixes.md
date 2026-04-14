@@ -111,3 +111,7 @@
 ## FIX-024 — Clip section (Start/End time range)
 **Fix**: New Clip section toggle + Start/End CTkEntry fields (hidden until toggle is on). `_parse_time()` accepts SS, MM:SS, and HH:MM:SS. Worker passes the range through `yt_dlp.utils.download_range_func` with `force_keyframes_at_cuts=True`. Validates empty/empty, End ≤ Start, and malformed formats inline before dispatch.  
 **File**: `app.py:85-106, 196-229, 310-329, 424-425`
+
+## FIX-025 — Re-downloading same video silently overwrote the prior file
+**Fix**: Added `_unique_outtmpl()` helper that sanitizes the title, checks for collision in `save_dir`, and appends ` (1)`, ` (2)`, … until a free name is found. `%` chars in the literal path are escaped to `%%` so yt-dlp does not treat them as template field markers. Refactored `_probe_playlist` → `_probe_info` so the same probe call feeds both playlist detection and title lookup.  
+**File**: `app.py:19, 459-499, 518-527`
