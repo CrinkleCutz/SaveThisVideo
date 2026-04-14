@@ -153,7 +153,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"SaveThisVideo {APP_VERSION}")
-        self.geometry(f"{WINDOW_W}x500")
+        self.geometry(f"{WINDOW_W}x530")
         self.resizable(False, False)
         self._save_dir: Path = Path.home() / "Desktop"
         self._downloading = False
@@ -205,6 +205,18 @@ class App(ctk.CTk):
                           values=list(QUALITY_OPTIONS.keys()),
                           width=185, height=36).grid(row=1, column=0)
 
+        h264_row = ctk.CTkFrame(opts, fg_color="transparent")
+        h264_row.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self._h264_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(h264_row, text="Prefer H.264",
+                        variable=self._h264_var,
+                        font=ctk.CTkFont(size=12),
+                        checkbox_width=18, checkbox_height=18).grid(
+            row=0, column=0, padx=(0, 6))
+        ctk.CTkLabel(h264_row, text="(vs. site codec)",
+                     font=ctk.CTkFont(size=11), text_color="gray").grid(
+            row=0, column=1)
+
         save_row = ctk.CTkFrame(opts, fg_color="transparent")
         save_row.grid(row=1, column=1, sticky="ew", padx=(16, 0))
         save_row.grid_columnconfigure(0, weight=1)
@@ -217,7 +229,7 @@ class App(ctk.CTk):
         ctk.CTkButton(save_row, text="Browse…", width=80, height=36,
                       command=self._browse).grid(row=0, column=1, padx=(8, 0))
 
-        # ── Cookie + H.264 row ────────────────────────────────────────────────
+        # ── Cookie row ────────────────────────────────────────────────────────
         cookie_row = ctk.CTkFrame(self, fg_color="transparent")
         cookie_row.grid(row=3, column=0, sticky="w", pady=(0, 2), **pad)
 
@@ -228,13 +240,7 @@ class App(ctk.CTk):
         self._cookies_var = ctk.StringVar(value="None")
         ctk.CTkOptionMenu(cookie_row, variable=self._cookies_var,
                           values=COOKIE_BROWSERS,
-                          width=120, height=30).grid(row=0, column=1, padx=(0, 20))
-
-        self._h264_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(cookie_row, text="Prefer H.264",
-                        variable=self._h264_var,
-                        font=ctk.CTkFont(size=12),
-                        checkbox_width=18, checkbox_height=18).grid(row=0, column=2)
+                          width=120, height=30).grid(row=0, column=1)
 
         ctk.CTkLabel(
             self,

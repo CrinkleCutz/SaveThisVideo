@@ -35,7 +35,8 @@ Single file: `app.py`. One class: `App(ctk.CTk)`.
 [Video URL label]
 [URL entry field ──────────────────────────────] [Paste]
 [Quality ▼]  [Save to: ~/Desktop ────────────] [Browse…]
-[Cookies from browser: ▼]   [☐ Prefer H.264]
+[☐ Prefer H.264 (vs. site codec)]
+[Cookies from browser: ▼]
   "Use your browser's login to reach private, members-only, or age-restricted videos."
 [☐ Clip section]   [Start  e.g. 1:23]   [End  e.g. 2:45]    (entries hidden until toggle is on)
   "Download only a portion of the video — leave a field blank to run to the start or end."
@@ -45,7 +46,7 @@ Single file: `app.py`. One class: `App(ctk.CTk)`.
 [Speed / ETA / state — single line]
 ```
 
-Window: 580×500, fixed size. Layout constants defined at module top: `WINDOW_W`, `SIDE_PAD`, `CTK_LABEL_PAD`, `WRAP`.
+Window: 580×530, fixed size. Layout constants defined at module top: `WINDOW_W`, `SIDE_PAD`, `CTK_LABEL_PAD`, `WRAP`.
 
 ## Quality Options
 
