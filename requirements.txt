@@ -1,4 +1,8 @@
 yt-dlp==2026.3.17
 customtkinter==5.2.2
+# S8: static-ffmpeg is only needed at build time (build.sh pip-installs it separately).
+# Kept here so `setup.sh` installs it for local `./build.sh` usage without extra steps.
 static-ffmpeg==3.0
+# S7: curl_cffi is a yt-dlp optional dependency used by some extractors (e.g. TikTok).
+# --collect-all curl_cffi in build.sh bundles it into the .app for those extractors.
 curl_cffi

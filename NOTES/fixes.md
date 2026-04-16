@@ -168,3 +168,38 @@
 - Window titlebar: `f"{APP_TITLE}  v{APP_VERSION}"`. Header label in the UI shows `APP_TITLE`.
 - Centered on launch: `x = (screenW − WINDOW_W) // 2`, `y = (screenH − WINDOW_H) // 2`, clamped to ≥ 0 via `max(0, ...)`. Previously the window appeared at the OS-default position (often half off-screen at the bottom on macOS).
 **File**: `app.py` (constants, `App.__init__`, `_build_ui` header label)
+
+## FIX-031 — Code review DEC-025: all 10 demands + 15 suggestions
+**Date**: 2026-04-15
+**Fix**: Implemented every finding from the v1.2 code review in one pass. Key changes:
+- **D1**: `_last_saved_path` shared state eliminated. Progress hook is now a closure inside `_worker()` writing to a local `saved_path[0]`. The path is passed to `_on_done(saved_path, save_dir)` as an argument via `self.after()`.
+- **D2**: New `_cleanup_partial(outtmpl)` deletes `.part`/`.ytdl` files on cancel or error. Called in all three `_worker` exception paths.
+- **D3+D4**: `"nooverwrites": True` added to `ydl_opts` — safety net for TOCTOU race in `_unique_outtmpl` and for probe failures that fall back to the default template.
+- **D5**: `_notify()` sanitizes to printable ASCII (strips `"`, `\`, and non-ASCII) and pipes AppleScript via stdin instead of `-e` argument.
+- **D6**: `_probe_info()` uses `socket_timeout: 15`. Worker checks `_cancel.is_set()` immediately after probe returns.
+- **D7**: `_ask_playlist()` polls `_playlist_done` in a 0.5s loop checking `_cancel`. `_on_close()` sets both `_cancel` and `_playlist_done` to prevent deadlock.
+- **D8**: `_tick()` returns immediately if `not self._downloading` — discards stale after()-queued callbacks.
+- **D9**: Hook closure handles `status == "error"` with `log.warning()`.
+- **D10**: CLAUDE.md build section rewritten to match unsigned `build.sh`.
+- **S1**: `_parse_time` validates seconds/minutes < 60.
+- **S2**: `_paste()` truncates to `MAX_URL_LEN=2048`.
+- **S3**: `_paste()` calls `focus_set()` on URL entry.
+- **S4**: `_set_controls_enabled(False/True)` + `_input_widgets` list disables all controls during download; re-enabled in `_reset()`.
+- **S5**: `save_dir` passed as arg to `_on_done()`.
+- **S6**: `_unique_outtmpl` loop capped at `n > 9999`.
+- **S7+S8**: `requirements.txt` comments document curl_cffi and static-ffmpeg rationale.
+- **S9**: Deleted stale `Video Downloader.spec`.
+- **S11**: `_browse()` checks `os.access(path, os.W_OK)` before accepting.
+- **S12**: `_wait_and_close()` logs warning on force-destroy with active worker.
+- **S13**: `_probe_info()` logs exceptions at warning level.
+- **S14**: `__all__ = ["App"]` added.
+- **S15**: Escape key bound to cancel when downloading.
+**File**: `app.py` (nearly all methods), `requirements.txt`, `CLAUDE.md`
+
+## FIX-032 — Comment audit: replace jargon, add missing WHY comments
+**Date**: 2026-04-15
+**Fix**: Full comment pass per Apple code quality standards.
+- **Added 11 comments** where the WHY was missing: module docstring (architecture/threading), `QUALITY_OPTIONS` (yt-dlp format syntax), `_ERROR_MAP` (order matters), `_notify.safe()` (excluded chars), `_app_icon` (Tk GC footgun), `_build_ui` grid row map, `_wait_and_close` (3s timeout rationale), `_cleanup_partial` %% unescape, `saved_path` mutable container, `status == "error"` (DASH/HLS), `nooverwrites` (TOCTOU).
+- **Replaced 18 jargon tags** (`# S1:`, `# D2:`, `# D7:`, etc.) with the actual reason. Code-review IDs are internal metadata — the code itself must explain WHY.
+- **Fixed 3 stale comments**: `_select_quality` "green" → "accent color", removed old review references `(D2)`, `(D9)`, `(S9)`.
+**File**: `app.py`

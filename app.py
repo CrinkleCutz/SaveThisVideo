@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""SaveThisVideo — yt-dlp GUI wrapper for macOS"""
+"""SaveThisVideo — macOS GUI wrapper around yt-dlp.
+
+Single-file architecture: one CTk window, one background thread per download.
+tkinter is not thread-safe, so all UI state is captured on the main thread
+before the worker starts, and every UI mutation from the worker goes through
+self.after(0, fn) to marshal back. See _start_download → _worker for the
+handoff boundary.
+"""
 
 import logging
 import logging.handlers
@@ -18,8 +25,12 @@ import customtkinter as ctk
 import yt_dlp
 from yt_dlp.utils import download_range_func, sanitize_filename
 
+__all__ = ["App"]
+
 APP_VERSION = "1.2"
 APP_TITLE   = "SAVE THIS VIDEO!"
+
+MAX_URL_LEN = 2048  # Defensive cap — clipboard can contain megabytes of text
 
 # ── Layout constants ──────────────────────────────────────────────────────────
 WINDOW_W      = 640
@@ -45,6 +56,8 @@ COLOR_TEXT       = "#ffffff"  # All text is pure white — hierarchy comes from 
 COLOR_DIVIDER    = "#272727"  # Hairline divider
 COLOR_BORDER_HI  = "#7c7c7c"  # Outlined-pill border
 
+# yt-dlp format selector syntax: "bestvideo[height<=N]+bestaudio" merges separate
+# video+audio streams via ffmpeg; "/best" is the fallback for sites with muxed files.
 QUALITY_OPTIONS = {
     "Best Available":   "bestvideo+bestaudio/best",
     "4K (2160p)":       "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
@@ -66,7 +79,8 @@ QUALITY_OPTIONS_H264 = {
     "360p":             "bestvideo[vcodec~=avc][height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]",
 }
 
-# Known yt-dlp error fragments → user-facing copy
+# Known yt-dlp error fragments → user-facing copy.
+# ORDER MATTERS: first match wins. Keep broad catch-alls (e.g. "cookies") at the end.
 _ERROR_MAP = [
     ("Video unavailable",           "This video is unavailable."),
     ("Private video",               "This video is private."),
@@ -144,19 +158,30 @@ def _parse_time(raw: str) -> float | None:
         raise ValueError(raw)
     if len(nums) == 1:
         return nums[0]
+    # Reject nonsensical values like "99:99" — seconds (and minutes in HH:MM:SS) must be < 60
     if len(nums) == 2:
+        if nums[1] >= 60:
+            raise ValueError(raw)
         return nums[0] * 60 + nums[1]
+    if nums[1] >= 60 or nums[2] >= 60:
+        raise ValueError(raw)
     return nums[0] * 3600 + nums[1] * 60 + nums[2]
 
 
 def _notify(title: str, message: str) -> None:
-    """Post a macOS Notification Center notification via osascript. Never raises."""
-    def esc(s: str) -> str:
-        return s.replace("\\", "\\\\").replace('"', '\\"')
-    script = f'display notification "{esc(message)}" with title "{esc(title)}"'
+    """Post a macOS Notification Center notification via osascript. Never raises.
+
+    Video titles can contain curly quotes, newlines, emoji, and other chars that
+    break AppleScript string parsing. We sanitize to printable ASCII and pipe via
+    stdin (not -e) to avoid shell-level escaping issues entirely.
+    """
+    def safe(s: str) -> str:
+        # Keep only printable ASCII minus backslash and double-quote (AppleScript delimiters)
+        return "".join(c if 32 <= ord(c) < 127 and c not in ('"', '\\') else ' ' for c in s)
+    script = f'display notification "{safe(message)}" with title "{safe(title)}"'
     try:
         subprocess.run(
-            ["osascript", "-e", script],
+            ["osascript"], input=script, text=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=3, check=False,
         )
@@ -197,11 +222,14 @@ class App(ctk.CTk):
         self._save_dir: Path = Path.home() / "Desktop"
         self._downloading = False
         self._cancel = threading.Event()
+        self._playlist_done = threading.Event()  # Set by _on_close to unblock _ask_playlist
         self._worker_thread: threading.Thread | None = None
-        self._last_saved_path: str = ""
         self._close_poll_count: int = 0
         self._quality_btns: dict[str, ctk.CTkButton] = {}
+        self._input_widgets: list = []  # Populated by _build_ui; disabled during download
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Escape cancels active download (mirrors the dock ■ button); no-op when idle
+        self.bind("<Escape>", lambda _: self._start_download() if self._downloading else None)
         self._set_window_icon()
         self._build_ui()
         log.info("App started — version %s", APP_VERSION)
@@ -216,6 +244,8 @@ class App(ctk.CTk):
         if not path.exists():
             return
         try:
+            # Must store as attribute — Tk PhotoImages are GC'd if no Python reference exists,
+            # which silently makes the icon disappear.
             self._app_icon = tk.PhotoImage(file=str(path))
             self.iconphoto(True, self._app_icon)
         except Exception as e:
@@ -232,8 +262,10 @@ class App(ctk.CTk):
         ).grid(row=row, column=0, sticky="w", padx=SIDE_PAD, pady=(0, 6))
 
     def _build_ui(self):
+        # Grid row map: 0=header, 1-2=URL, 3-4=quality, 5-6=save, 7-8=options,
+        # 9=clip(in opts frame), 10=spacer(weight=1), 11=divider, 12=dock.
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(10, weight=1)  # Spacer row pushes dock to bottom
+        self.grid_rowconfigure(10, weight=1)  # Flexible spacer pushes dock to window bottom
 
         # ── Header strip ──────────────────────────────────────────────────────
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -263,12 +295,13 @@ class App(ctk.CTk):
         self._url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self._url_entry.bind("<Return>", lambda _: self._start_download())
 
-        ctk.CTkButton(url_row, text="PASTE", width=84, height=40, corner_radius=20,
+        paste_btn = ctk.CTkButton(url_row, text="PASTE", width=84, height=40, corner_radius=20,
                       fg_color="transparent", hover_color=COLOR_HOVER,
                       border_width=1, border_color=COLOR_BORDER_HI,
                       text_color=COLOR_TEXT,
                       font=ctk.CTkFont(size=11, weight="bold"),
-                      command=self._paste).grid(row=0, column=1)
+                      command=self._paste)
+        paste_btn.grid(row=0, column=1)
 
         # ── Quality (segmented pills) ─────────────────────────────────────────
         self._section_label("Quality", row=3)
@@ -303,12 +336,13 @@ class App(ctk.CTk):
             text_color=COLOR_TEXT)
         self._path_lbl.grid(row=0, column=0, sticky="ew")
 
-        ctk.CTkButton(save_row, text="BROWSE", width=92, height=34, corner_radius=17,
+        browse_btn = ctk.CTkButton(save_row, text="BROWSE", width=92, height=34, corner_radius=17,
                       fg_color="transparent", hover_color=COLOR_HOVER,
                       border_width=1, border_color=COLOR_BORDER_HI,
                       text_color=COLOR_TEXT,
                       font=ctk.CTkFont(size=11, weight="bold"),
-                      command=self._browse).grid(row=0, column=1, padx=(10, 0))
+                      command=self._browse)
+        browse_btn.grid(row=0, column=1, padx=(10, 0))
 
         # ── Options ───────────────────────────────────────────────────────────
         self._section_label("Options", row=7)
@@ -322,13 +356,13 @@ class App(ctk.CTk):
 
         # Prefer H.264
         self._h264_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="Prefer H.264",
+        h264_cb = ctk.CTkCheckBox(opts, text="Prefer H.264",
                         variable=self._h264_var,
                         font=label_font, text_color=COLOR_TEXT,
                         fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOV,
                         border_color=COLOR_BORDER_HI,
-                        checkbox_width=18, checkbox_height=18).grid(
-            row=0, column=0, sticky="w")
+                        checkbox_width=18, checkbox_height=18)
+        h264_cb.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(opts,
             text="Forces AVC video for compatibility with older iPhones, Apple TVs, and smart TVs.",
             font=cap_font, text_color=COLOR_TEXT,
@@ -337,13 +371,13 @@ class App(ctk.CTk):
 
         # Clip section
         self._clip_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="Clip section",
+        clip_cb = ctk.CTkCheckBox(opts, text="Clip section",
                         variable=self._clip_var, command=self._toggle_clip,
                         font=label_font, text_color=COLOR_TEXT,
                         fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOV,
                         border_color=COLOR_BORDER_HI,
-                        checkbox_width=18, checkbox_height=18).grid(
-            row=2, column=0, sticky="w")
+                        checkbox_width=18, checkbox_height=18)
+        clip_cb.grid(row=2, column=0, sticky="w")
         ctk.CTkLabel(opts,
             text="Download only a portion of the video — leave a field blank to run to the start or end.",
             font=cap_font, text_color=COLOR_TEXT,
@@ -388,7 +422,7 @@ class App(ctk.CTk):
             row=0, column=0, padx=(0, 12))
 
         self._cookies_var = ctk.StringVar(value="None")
-        ctk.CTkOptionMenu(cookies_row, variable=self._cookies_var,
+        cookies_menu = ctk.CTkOptionMenu(cookies_row, variable=self._cookies_var,
                           values=COOKIE_BROWSERS,
                           width=110, height=28, corner_radius=14,
                           fg_color=COLOR_INTERACT,
@@ -397,13 +431,21 @@ class App(ctk.CTk):
                           dropdown_fg_color=COLOR_SURFACE,
                           dropdown_hover_color=COLOR_HOVER,
                           text_color=COLOR_TEXT,
-                          font=ctk.CTkFont(size=12)).grid(row=0, column=1)
+                          font=ctk.CTkFont(size=12))
+        cookies_menu.grid(row=0, column=1)
 
         ctk.CTkLabel(opts,
             text="Use your browser's login to reach private, members-only, or age-restricted videos.",
             font=cap_font, text_color=COLOR_TEXT,
             anchor="w", wraplength=CAPTION_WRAP, justify="left").grid(
             row=6, column=0, sticky="w", padx=(28, 0), pady=(2, 0))
+
+        # Controls disabled during download to prevent misleading mid-download changes
+        self._input_widgets = [
+            self._url_entry, paste_btn, browse_btn,
+            h264_cb, clip_cb, cookies_menu,
+            self._start_entry, self._end_entry,
+        ]
 
         # ── Bottom "Now Playing" dock ─────────────────────────────────────────
         ctk.CTkFrame(self, fg_color=COLOR_DIVIDER, height=1, corner_radius=0).grid(
@@ -447,7 +489,7 @@ class App(ctk.CTk):
         self._dl_btn.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(16, 0))
 
     def _select_quality(self, key: str) -> None:
-        """Update the segmented quality row: highlight the active pill in green."""
+        """Update the segmented quality row: highlight the active pill in accent color."""
         self._quality_var.set(key)
         for k, btn in self._quality_btns.items():
             if k == key:
@@ -465,6 +507,17 @@ class App(ctk.CTk):
             self._clip_row.grid_remove()
             self._start_var.set("")
             self._end_var.set("")
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        """Enable/disable all input controls + quality pills.
+        Called with False at download start and True in _reset(), so mid-download
+        changes to quality/cookies/clip don't mislead the user.
+        """
+        state = "normal" if enabled else "disabled"
+        for w in self._input_widgets:
+            w.configure(state=state)
+        for btn in self._quality_btns.values():
+            btn.configure(state=state)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -503,11 +556,15 @@ class App(ctk.CTk):
         if not text:
             self._set_status(meta="Nothing on clipboard to paste.")
             return
-        self._url_var.set(text)
+        self._url_var.set(text[:MAX_URL_LEN])
+        self._url_entry.focus_set()  # So pressing Enter triggers download immediately
 
     def _browse(self):
         path = fd.askdirectory(initialdir=str(self._save_dir), title="Choose download folder")
         if path:
+            if not os.access(path, os.W_OK):
+                self._set_status(meta="That folder is not writable. Choose another.", error=True)
+                return
             self._save_dir = Path(path)
             self._path_lbl.configure(text=self._trunc_path(self._save_dir))
 
@@ -515,6 +572,7 @@ class App(ctk.CTk):
         """Handle window close: cancel any active download gracefully, then destroy."""
         if self._downloading:
             self._cancel.set()
+            self._playlist_done.set()  # Unblock _ask_playlist if its dialog is pending
             self._dl_btn.configure(text="■", state="disabled")
             self._close_poll_count = 0
             self.after(100, self._wait_and_close)
@@ -523,11 +581,16 @@ class App(ctk.CTk):
             self.destroy()
 
     def _wait_and_close(self):
-        """Poll until the worker exits (max 30 × 100 ms = 3 s), then destroy."""
+        """Poll until the worker exits (max 30 × 100 ms = 3 s), then destroy.
+        The 3s cap is a UX tradeoff: don't hold the window hostage if a merge is slow.
+        The daemon thread will be killed on Python exit regardless.
+        """
         self._close_poll_count += 1
         if self._worker_thread and self._worker_thread.is_alive() and self._close_poll_count < 30:
             self.after(100, self._wait_and_close)
         else:
+            if self._worker_thread and self._worker_thread.is_alive():
+                log.warning("Force-closing with worker thread still active.")
             log.info("App closed.")
             self.destroy()
 
@@ -560,7 +623,7 @@ class App(ctk.CTk):
         except OSError:
             pass  # Cannot determine — proceed; yt-dlp will surface the error if needed
 
-        # Capture UI state on the main thread before the worker starts (D2)
+        # Capture all UI state NOW — worker must never touch tkinter objects directly
         quality_key = self._quality_var.get()
         save_dir    = self._save_dir
         cookies_key = self._cookies_var.get()
@@ -587,14 +650,14 @@ class App(ctk.CTk):
             clip_range = (start_sec or 0.0, end_sec)
 
         self._downloading = True
-        self._last_saved_path = ""
         self._cancel.clear()
+        self._set_controls_enabled(False)
         self._dl_btn.configure(
             text="■", state="normal",
             fg_color=COLOR_DANGER,
             hover_color=COLOR_DANGER_HOV)
         self._progress.set(0)
-        self._set_status(filename="Preparing…", meta="Starting download")   # Clear previous filename (S3)
+        self._set_status(filename="Preparing…", meta="Starting download")
 
         log.info("Download started — quality=%s cookies=%s h264=%s clip=%s dest=%s",
                  quality_key, cookies_key, h264, clip_range, save_dir)
@@ -611,7 +674,8 @@ class App(ctk.CTk):
         """Extract URL metadata (no download). Used for both playlist detection and
         filename-collision checks. Runs synchronously on the worker thread.
         """
-        opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist"}
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
+                "socket_timeout": 15}  # Prevent indefinite hang on slow/dead DNS
         ffmpeg = _bundled_ffmpeg()
         if ffmpeg:
             opts["ffmpeg_location"] = ffmpeg
@@ -620,7 +684,8 @@ class App(ctk.CTk):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)
-        except Exception:
+        except Exception as e:
+            log.warning("Probe failed: %s", e)
             return None
 
     @staticmethod
@@ -641,6 +706,8 @@ class App(ctk.CTk):
         candidate = save_dir / f"{safe}.{ext}"
         n = 1
         while candidate.exists():
+            if n > 9999:                           # Prevent infinite loop on pathological FS
+                return default
             candidate = save_dir / f"{safe} ({n}).{ext}"
             n += 1
         # Escape '%' so yt-dlp does not treat literal title chars as field markers.
@@ -649,9 +716,10 @@ class App(ctk.CTk):
     def _ask_playlist(self, count: int) -> bool:
         """Show a playlist confirmation dialog on the main thread; block the worker until answered.
         Returns True if the user confirms, False to cancel.
+        D7: Uses short-timeout loop so window close (which sets _cancel) is not blocked.
         """
         result = {"confirmed": False}
-        done   = threading.Event()
+        self._playlist_done.clear()
 
         def _show():
             confirmed = mb.askyesno(
@@ -661,13 +729,29 @@ class App(ctk.CTk):
                 icon="question",
             )
             result["confirmed"] = confirmed
-            done.set()
+            self._playlist_done.set()
 
         self.after(0, _show)
-        done.wait(timeout=120)   # Treat no response within 2 min as cancel
+        while not self._playlist_done.wait(timeout=0.5):
+            if self._cancel.is_set():
+                return False
         return result["confirmed"]
 
     # ── Download worker (background thread) ───────────────────────────────────
+
+    @staticmethod
+    def _cleanup_partial(outtmpl: str) -> None:
+        """Best-effort removal of .part/.ytdl files left by incomplete downloads."""
+        try:
+            # Undo the %% escaping that _unique_outtmpl applies for yt-dlp's template parser
+            base = Path(outtmpl.replace("%%", "%"))
+            for ext in (".part", ".ytdl"):
+                p = base.parent / (base.name + ext)
+                if p.exists():
+                    p.unlink()
+                    log.info("Cleaned up partial file: %s", p.name)
+        except Exception:
+            pass
 
     def _worker(self, url: str, quality_key: str, save_dir: Path,
                 cookies_key: str, h264: bool,
@@ -680,6 +764,9 @@ class App(ctk.CTk):
 
         # Probe URL info — used for both playlist detection and filename collision check
         info = self._probe_info(url, cookies_key)
+        if self._cancel.is_set():              # User cancelled during the (potentially slow) probe
+            self.after(0, self._on_cancelled)
+            return
         if info and info.get("_type") == "playlist":
             count = len(info.get("entries") or [])
             if count > 1 and not self._ask_playlist(count):
@@ -687,6 +774,37 @@ class App(ctk.CTk):
                 return
 
         outtmpl = self._unique_outtmpl(info, save_dir, is_audio)
+
+        # Mutable container shared between hook closure and this function — both run on
+        # the same worker thread, so no lock needed.  Avoids cross-thread shared state.
+        saved_path = [""]
+
+        def hook(d: dict):
+            """Progress callback — runs on this worker thread."""
+            if self._cancel.is_set():
+                raise _Cancelled()
+            status = d.get("status")
+            if status == "downloading":
+                downloaded = d.get("downloaded_bytes", 0)
+                total      = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                speed      = d.get("speed") or 0
+                eta        = d.get("eta")
+                pct        = (downloaded / total) if total else 0
+                if speed >= 1_048_576:
+                    speed_str = f"{speed / 1_048_576:.1f} MB/s"
+                elif speed:
+                    speed_str = f"{speed / 1024:.0f} KB/s"
+                else:
+                    speed_str = ""
+                eta_str  = f"ETA {int(eta) // 60}:{int(eta) % 60:02d}" if eta else ""
+                meta     = "  •  ".join(x for x in [speed_str, eta_str] if x)
+                filename = os.path.basename(d.get("filename", ""))
+                self.after(0, self._tick, pct, filename, meta)
+            elif status == "finished":
+                saved_path[0] = d.get("filename", "")
+                self.after(0, self._tick, 1.0, "", "Processing…")
+            elif status == "error":                # DASH/HLS fragment errors — yt-dlp may retry
+                log.warning("Download hook error: %s", d.get("error_message", "(no message)"))
 
         postprocessors = []
         if is_audio:
@@ -701,9 +819,10 @@ class App(ctk.CTk):
             "outtmpl":             outtmpl,
             "merge_output_format": None if is_audio else "mp4",
             "postprocessors":      postprocessors,
-            "progress_hooks":      [self._hook],
+            "progress_hooks":      [hook],
             "quiet":               True,
             "no_warnings":         True,
+            "nooverwrites":        True,           # Safety net: _unique_outtmpl has a TOCTOU window
             "retries":             10,
             "fragment_retries":    10,
             "file_access_retries": 5,
@@ -721,12 +840,15 @@ class App(ctk.CTk):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             if self._cancel.is_set():
+                self._cleanup_partial(outtmpl)
                 self.after(0, self._on_cancelled)
             else:
-                self.after(0, self._on_done)
+                self.after(0, self._on_done, saved_path[0], save_dir)
         except _Cancelled:
+            self._cleanup_partial(outtmpl)
             self.after(0, self._on_cancelled)
         except Exception as e:
+            self._cleanup_partial(outtmpl)
             if self._cancel.is_set():
                 self.after(0, self._on_cancelled)
             else:
@@ -734,55 +856,29 @@ class App(ctk.CTk):
                 log.error("Download failed — %s", str(e).split("\n")[0])
                 self.after(0, self._on_error, msg)
 
-    def _hook(self, d: dict):
-        """Progress callback — runs on background thread; all UI updates via after()."""
-        if self._cancel.is_set():
-            raise _Cancelled()
-
-        status = d.get("status")
-
-        if status == "downloading":
-            downloaded = d.get("downloaded_bytes", 0)
-            total      = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
-            speed      = d.get("speed") or 0
-            eta        = d.get("eta")
-            pct        = (downloaded / total) if total else 0
-
-            if speed >= 1_048_576:
-                speed_str = f"{speed / 1_048_576:.1f} MB/s"
-            elif speed:
-                speed_str = f"{speed / 1024:.0f} KB/s"
-            else:
-                speed_str = ""
-
-            eta_str  = f"ETA {int(eta) // 60}:{int(eta) % 60:02d}" if eta else ""
-            meta     = "  •  ".join(x for x in [speed_str, eta_str] if x)
-            filename = os.path.basename(d.get("filename", ""))
-            self.after(0, self._tick, pct, filename, meta)
-
-        elif status == "finished":
-            # Capture the final output path for the completion message (S2)
-            self._last_saved_path = d.get("filename", "")
-            self.after(0, self._tick, 1.0, "", "Processing…")
-
     def _tick(self, pct: float, filename: str, meta: str):
+        if not self._downloading:   # Stale ticks queued via after() before _reset ran — discard
+            return
         self._progress.set(pct)
         self._set_status(filename=filename, meta=meta)
 
     # ── Completion handlers (always on main thread via after()) ───────────────
 
-    def _on_done(self):
-        saved_name = os.path.basename(self._last_saved_path)
+    def _on_done(self, saved_path: str = "", save_dir: Path | None = None):
+        """Both args are passed from the worker to avoid reading shared mutable state."""
+        if save_dir is None:
+            save_dir = self._save_dir
+        saved_name = os.path.basename(saved_path)
         self._reset()
         self._progress.set(1.0)
         if saved_name:
-            self._set_status(filename=saved_name, meta=f"✓  Saved to {self._save_dir}")
+            self._set_status(filename=saved_name, meta=f"✓  Saved to {save_dir}")
         else:
             self._set_status(filename="Download complete",
-                             meta=f"✓  Saved to {self._save_dir}")
+                             meta=f"✓  Saved to {save_dir}")
         log.info("Download complete — file=%s", saved_name or "(unknown)")
         _notify("Download complete",
-                saved_name if saved_name else f"Saved to {self._save_dir}")
+                saved_name if saved_name else f"Saved to {save_dir}")
 
     def _on_cancelled(self):
         self._reset()
@@ -795,15 +891,16 @@ class App(ctk.CTk):
 
     def _reset(self):
         self._downloading = False
-        self._progress.set(0)   # Return bar to zero on every terminal state (S9)
+        self._progress.set(0)
         self._dl_btn.configure(
             text="▶", state="normal",
             fg_color=COLOR_ACCENT,
             hover_color=COLOR_ACCENT_HOV)
+        self._set_controls_enabled(True)
 
 
 if __name__ == "__main__":
     # Pinned to dark — the Spotify-inspired palette only works in dark mode (DEC-022).
-    ctk.set_appearance_mode("dark")      # Inside __main__ guard — no side effect on import (D9)
+    ctk.set_appearance_mode("dark")      # Inside __main__ guard — no Tk init on import
     _setup_logging()
     App().mainloop()

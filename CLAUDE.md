@@ -117,14 +117,14 @@ When **Prefer H.264** is checked, a parallel `QUALITY_OPTIONS_H264` map is used.
 ### Error Messages (S1)
 `_friendly_error()` maps 12 known yt-dlp error substrings to plain-English copy via `_ERROR_MAP`. The `[extractor] id:` prefix is stripped from unmatched errors via regex.
 
-### Playlist Detection (D5)
-`_probe_playlist()` runs `extract_flat` in the worker thread before downloading. If count > 1, `_ask_playlist()` shows a native `tkinter.messagebox.askyesno` dialog. The worker blocks on `threading.Event.wait(timeout=120)` until the user responds.
+### Playlist Detection (D5, D7 fix)
+`_probe_info()` runs `extract_flat` (with `socket_timeout=15`) in the worker thread before downloading. If count > 1, `_ask_playlist()` shows a native `tkinter.messagebox.askyesno` dialog. Worker polls `_playlist_done` in a 0.5s loop checking `_cancel.is_set()` — window close sets both `_cancel` and `_playlist_done` to prevent deadlock.
 
 ### Disk Space (S8)
 `shutil.disk_usage(save_dir).free` checked before download starts. Blocked with friendly message if < 500 MB (`DISK_WARN_BYTES`). `OSError` silently swallowed (unmounted/inaccessible path).
 
-### Completion Message (S2)
-`_hook` captures `d["filename"]` when `status == "finished"` into `self._last_saved_path`. `_on_done()` shows the filename on line 1 and save directory on line 2.
+### Completion Message (S2, D1 fix)
+The progress hook (closure in `_worker`) captures `d["filename"]` into a thread-local `saved_path[0]`. `_on_done(saved_path, save_dir)` receives both as arguments (no shared state). Shows filename on line 1 and the **captured** save directory on line 2 (S5 fix).
 
 ### Logging (S6)
 `_setup_logging()` configures `RotatingFileHandler` at `~/Library/Logs/SaveThisVideo/app.log` (2 MB, 3 backups). Called inside `__main__` guard only. Full URLs are **not** logged (privacy).
@@ -134,17 +134,14 @@ When **Prefer H.264** is checked, a parallel `QUALITY_OPTIONS_H264` map is used.
 - **Packaged** (`.app`): detects `sys.frozen` → returns `sys._MEIPASS/bin/ffmpeg`
 
 ## Distribution (Build)
-`build.sh` performs the full pipeline:
-1. PyInstaller `--windowed --onedir` with `customtkinter` + `yt_dlp` collected + ffmpeg binary bundled
-2. `codesign --deep --force --options runtime --sign "Developer ID Application: ..."`
-3. `xcrun notarytool submit --keychain-profile ... --wait`
-4. `xcrun stapler staple` → `spctl -a -v` verification
-5. `ditto -c -k --keepParent` → distribution zip
+`build.sh` produces an **unsigned** `.app` bundle (D10 fix — no codesign/notarize steps):
+1. `make_icon.py` → regenerates `icon.icns` from `app_icon.png`
+2. `static-ffmpeg` → fetches the static ffmpeg binary
+3. PyInstaller `--windowed --onedir` with `customtkinter` + `yt_dlp` + `curl_cffi` collected, ffmpeg + `app_icon.png` bundled, `--icon=icon.icns`
+4. `ditto -c -k --keepParent` → `dist/SaveThisVideo.zip`
 
-**Developer setup required before first build:**
-- Apple Developer ID Application certificate in keychain
-- `xcrun notarytool store-credentials "AC_PASSWORD" --apple-id ... --team-id ...`
-- Fill in `DEVELOPER_ID` and `NOTARYTOOL_KEYCHAIN_PROFILE` at top of `build.sh`
+Recipients right-click → Open the first time to bypass Gatekeeper.
+For signed + notarized distribution, add codesign/notarytool steps to `build.sh` or create a separate `build_signed.sh`.
 
 ## Repo Hygiene
 `.gitignore` excludes: `.venv/`, `build/`, `dist/`, `*.spec`, `__pycache__/`, `.DS_Store`  
@@ -159,8 +156,8 @@ Pinned in `requirements.txt`. To upgrade yt-dlp when a site breaks:
 
 ## NOTES
 See `NOTES/` for project history:
-- `decisions.md` — DEC-001 through DEC-023
-- `fixes.md` — FIX-001 through FIX-026
+- `decisions.md` — DEC-001 through DEC-025
+- `fixes.md` — FIX-001 through FIX-032
 - `errors.md` — ERR-001 through ERR-005
 
 ## App Icon
