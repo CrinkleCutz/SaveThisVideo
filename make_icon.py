@@ -1,91 +1,19 @@
 #!/usr/bin/env python3
-"""Generate icon.icns for SaveThisVideo.
+"""Build icon.icns from app_icon.png.
 
-Design: dark navy rounded square, horizontal film strip spanning full width,
-bold green downward arrow centered on the strip.
+Loads the source PNG, pads to a square (transparent), resamples at every size
+macOS requires, then runs iconutil to produce icon.icns.
 """
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageOps
 except ImportError:
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'Pillow'])
-    from PIL import Image, ImageDraw
-
-
-def draw(size: int) -> Image.Image:
-    s = size
-    img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    # ── Background: dark navy rounded square ──────────────────────────────────
-    d.rounded_rectangle(
-        [0, 0, s - 1, s - 1],
-        radius=int(s * 0.175),
-        fill=(18, 18, 30, 255),
-    )
-
-    # ── Film strip ────────────────────────────────────────────────────────────
-    sy = int(s * 0.27)          # strip top
-    ey = int(s * 0.73)          # strip bottom
-    sh = ey - sy                # strip total height
-    ph = int(sh * 0.20)         # sprocket row height
-
-    d.rectangle([0, sy,      s - 1, ey     ], fill=(30, 30, 50, 255))   # strip body
-    d.rectangle([0, sy,      s - 1, sy + ph], fill=(10, 10, 18, 255))   # top sprocket row
-    d.rectangle([0, ey - ph, s - 1, ey     ], fill=(10, 10, 18, 255))   # bottom sprocket row
-
-    # Sprocket holes (7 per row, top and bottom)
-    n      = 7
-    hw     = int(ph * 0.52)
-    hh     = int(ph * 0.52)
-    hr     = max(1, int(hw * 0.22))
-    margin = int(s * 0.06)
-    gap    = (s - 2 * margin) / max(n - 1, 1)
-
-    for i in range(n):
-        cx = int(margin + i * gap)
-        for cy in (sy + ph // 2, ey - ph // 2):
-            d.rounded_rectangle(
-                [cx - hw // 2, cy - hh // 2, cx + hw // 2, cy + hh // 2],
-                radius=hr,
-                fill=(210, 215, 230, 255),
-            )
-
-    # ── Down arrow (green) ────────────────────────────────────────────────────
-    green = (46, 204, 113, 255)
-
-    ct = sy + ph                    # content area top (below top sprocket row)
-    cb = ey - ph                    # content area bottom
-    ch = cb - ct                    # content height
-    cx = s // 2
-
-    shaft_w  = int(s * 0.115)
-    head_w   = int(s * 0.30)
-
-    shaft_top = ct + int(ch * 0.10)
-    shaft_bot = ct + int(ch * 0.60)
-    head_top  = shaft_bot
-    head_bot  = ct + int(ch * 0.92)
-
-    # Shaft (rectangle)
-    d.rectangle(
-        [cx - shaft_w // 2, shaft_top, cx + shaft_w // 2, shaft_bot],
-        fill=green,
-    )
-    # Head (downward triangle)
-    d.polygon(
-        [(cx - head_w // 2, head_top),
-         (cx + head_w // 2, head_top),
-         (cx,               head_bot)],
-        fill=green,
-    )
-
-    return img
+    from PIL import Image, ImageOps
 
 
 # macOS iconset requires these exact filenames and pixel dimensions
@@ -103,16 +31,28 @@ SIZES = [
 ]
 
 
-def main():
+def main() -> None:
     base    = Path(__file__).parent
+    src     = base / 'app_icon.png'
     iconset = base / 'icon.iconset'
     icns    = base / 'icon.icns'
 
+    if not src.exists():
+        print(f'ERROR: missing source image {src}', file=sys.stderr)
+        sys.exit(1)
+
     iconset.mkdir(exist_ok=True)
 
-    print('  Rendering icon at all required sizes...')
+    master = Image.open(src).convert('RGBA')
+    side   = max(master.size)
+    if master.size != (side, side):
+        # Pad non-square source to a centered square with transparent bars.
+        master = ImageOps.pad(master, (side, side), method=Image.LANCZOS,
+                              color=(0, 0, 0, 0), centering=(0.5, 0.5))
+
+    print(f'  Source: {src.name} → {side}x{side} (squared)')
     for filename, size in SIZES:
-        draw(size).save(iconset / filename)
+        master.resize((size, size), Image.LANCZOS).save(iconset / filename)
         print(f'    {size}px  →  {filename}')
 
     print('  Running iconutil...')

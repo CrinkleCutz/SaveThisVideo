@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tkinter as tk
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from pathlib import Path
@@ -17,15 +18,32 @@ import customtkinter as ctk
 import yt_dlp
 from yt_dlp.utils import download_range_func, sanitize_filename
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2"
+APP_TITLE   = "SAVE THIS VIDEO!"
 
 # ── Layout constants ──────────────────────────────────────────────────────────
-WINDOW_W      = 580
-SIDE_PAD      = 20
+WINDOW_W      = 640
+WINDOW_H      = 660
+SIDE_PAD      = 24
 CTK_LABEL_PAD = 8
-WRAP          = WINDOW_W - SIDE_PAD * 2 - CTK_LABEL_PAD   # 532
+WRAP          = WINDOW_W - SIDE_PAD * 2 - CTK_LABEL_PAD   # 584
+CAPTION_WRAP  = WRAP - 28                                 # Indented under checkbox
+DOCK_H        = 92
 
 DISK_WARN_BYTES = 500 * 1024 * 1024  # Warn when save destination has < 500 MB free
+
+# ── Visual tokens (dark theme, blue accent) ───────────────────────────────────
+COLOR_BG         = "#121212"  # Page background (deepest layer)
+COLOR_SURFACE    = "#181818"  # Dock / elevated surfaces
+COLOR_INTERACT   = "#575757"  # Inputs, inactive pills — lifted ~20% toward white for contrast
+COLOR_HOVER      = "#616161"  # Hover-state fill
+COLOR_ACCENT     = "#539df5"  # Blue accent (CTA, active pill, progress, checked)
+COLOR_ACCENT_HOV = "#3d8ae0"
+COLOR_DANGER     = "#f3727f"  # Negative / cancel
+COLOR_DANGER_HOV = "#e26570"
+COLOR_TEXT       = "#ffffff"  # All text is pure white — hierarchy comes from weight/size
+COLOR_DIVIDER    = "#272727"  # Hairline divider
+COLOR_BORDER_HI  = "#7c7c7c"  # Outlined-pill border
 
 QUALITY_OPTIONS = {
     "Best Available":   "bestvideo+bestaudio/best",
@@ -68,6 +86,17 @@ _ERROR_MAP = [
 
 COOKIE_BROWSERS = ["None", "Safari", "Chrome", "Firefox"]
 
+# Short labels for the segmented quality pill row — must cover every key in QUALITY_OPTIONS.
+QUALITY_SHORT = {
+    "Best Available":   "BEST",
+    "4K (2160p)":       "4K",
+    "1080p":            "1080p",
+    "720p":             "720p",
+    "480p":             "480p",
+    "360p":             "360p",
+    "Audio Only (MP3)": "AUDIO",
+}
+
 
 class _Cancelled(Exception):
     """Raised inside the yt-dlp progress hook to abort an in-progress download."""
@@ -78,6 +107,13 @@ def _bundled_ffmpeg() -> str | None:
     if getattr(sys, "frozen", False):
         return os.path.join(sys._MEIPASS, "bin", "ffmpeg")
     return None
+
+
+def _resource_path(name: str) -> Path:
+    """Resolve a bundled resource both in dev and in the PyInstaller-packaged .app."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / name
+    return Path(__file__).parent / name
 
 
 def _friendly_error(raw: str) -> str:
@@ -152,172 +188,281 @@ log = logging.getLogger("savethisvideo")
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title(f"SaveThisVideo {APP_VERSION}")
-        self.geometry(f"{WINDOW_W}x530")
+        self.title(f"{APP_TITLE}  v{APP_VERSION}")
+        x = max(0, (self.winfo_screenwidth()  - WINDOW_W) // 2)
+        y = max(0, (self.winfo_screenheight() - WINDOW_H) // 2)
+        self.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
         self.resizable(False, False)
+        self.configure(fg_color=COLOR_BG)
         self._save_dir: Path = Path.home() / "Desktop"
         self._downloading = False
         self._cancel = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._last_saved_path: str = ""
         self._close_poll_count: int = 0
+        self._quality_btns: dict[str, ctk.CTkButton] = {}
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._set_window_icon()
         self._build_ui()
         log.info("App started — version %s", APP_VERSION)
 
+    def _set_window_icon(self) -> None:
+        """Attach app_icon.png to the Tk window. Best-effort — never raises.
+
+        On macOS this sets the titlebar / minimized-window icon; the Dock icon
+        in the distributed .app comes from icon.icns via PyInstaller --icon.
+        """
+        path = _resource_path("app_icon.png")
+        if not path.exists():
+            return
+        try:
+            self._app_icon = tk.PhotoImage(file=str(path))
+            self.iconphoto(True, self._app_icon)
+        except Exception as e:
+            log.debug("Window icon failed: %s", e)
+
     # ── UI construction ────────────────────────────────────────────────────────
+
+    def _section_label(self, text: str, row: int) -> None:
+        """Uppercase, tracked muted label — Spotify's systematic section voice."""
+        ctk.CTkLabel(
+            self, text=text.upper(), anchor="w",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_TEXT,
+        ).grid(row=row, column=0, sticky="w", padx=SIDE_PAD, pady=(0, 6))
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        pad = {"padx": SIDE_PAD}
+        self.grid_rowconfigure(10, weight=1)  # Spacer row pushes dock to bottom
 
-        ctk.CTkLabel(self, text="Video URL", anchor="w",
-                     font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, sticky="w", pady=(20, 4), **pad)
+        # ── Header strip ──────────────────────────────────────────────────────
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=SIDE_PAD, pady=(18, 14))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text=APP_TITLE, anchor="w",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=COLOR_TEXT).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(header, text=f"v{APP_VERSION}", anchor="e",
+                     font=ctk.CTkFont(size=11),
+                     text_color=COLOR_TEXT).grid(row=0, column=1, sticky="e")
+
+        # ── Paste a link ──────────────────────────────────────────────────────
+        self._section_label("Paste a link", row=1)
 
         url_row = ctk.CTkFrame(self, fg_color="transparent")
-        url_row.grid(row=1, column=0, sticky="ew", pady=(0, 12), **pad)
+        url_row.grid(row=2, column=0, sticky="ew", padx=SIDE_PAD, pady=(0, 18))
         url_row.grid_columnconfigure(0, weight=1)
 
         self._url_var = ctk.StringVar()
         self._url_entry = ctk.CTkEntry(
-            url_row, textvariable=self._url_var, height=36,
-            placeholder_text="Paste a link from YouTube, Vimeo, Twitter, and 1,000+ sites…")
-        self._url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+            url_row, textvariable=self._url_var, height=40, corner_radius=20,
+            fg_color=COLOR_INTERACT, border_color=COLOR_INTERACT,
+            text_color=COLOR_TEXT, placeholder_text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=13),
+            placeholder_text="Paste a YouTube, Vimeo, Twitter link…")
+        self._url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self._url_entry.bind("<Return>", lambda _: self._start_download())
 
-        ctk.CTkButton(url_row, text="Paste", width=64, height=36,
+        ctk.CTkButton(url_row, text="PASTE", width=84, height=40, corner_radius=20,
+                      fg_color="transparent", hover_color=COLOR_HOVER,
+                      border_width=1, border_color=COLOR_BORDER_HI,
+                      text_color=COLOR_TEXT,
+                      font=ctk.CTkFont(size=11, weight="bold"),
                       command=self._paste).grid(row=0, column=1)
 
-        opts = ctk.CTkFrame(self, fg_color="transparent")
-        opts.grid(row=2, column=0, sticky="ew", pady=(0, 12), **pad)
-        opts.grid_columnconfigure(1, weight=1)
+        # ── Quality (segmented pills) ─────────────────────────────────────────
+        self._section_label("Quality", row=3)
 
-        ctk.CTkLabel(opts, text="Quality", anchor="w",
-                     font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 4))
-        ctk.CTkLabel(opts, text="Save to", anchor="w",
-                     font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=1, sticky="w", padx=(16, 0), pady=(0, 4))
+        q_row = ctk.CTkFrame(self, fg_color="transparent")
+        q_row.grid(row=4, column=0, sticky="ew", padx=SIDE_PAD, pady=(0, 18))
+        for i in range(len(QUALITY_OPTIONS)):
+            q_row.grid_columnconfigure(i, weight=1, uniform="qual")
 
         self._quality_var = ctk.StringVar(value="Best Available")
-        ctk.CTkOptionMenu(opts, variable=self._quality_var,
-                          values=list(QUALITY_OPTIONS.keys()),
-                          width=185, height=36).grid(row=1, column=0)
+        for i, key in enumerate(QUALITY_OPTIONS.keys()):
+            btn = ctk.CTkButton(
+                q_row, text=QUALITY_SHORT[key], height=32, corner_radius=16,
+                fg_color=COLOR_INTERACT, hover_color=COLOR_HOVER,
+                text_color=COLOR_TEXT,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda k=key: self._select_quality(k))
+            btn.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 4, 0))
+            self._quality_btns[key] = btn
+        self._select_quality("Best Available")
 
-        h264_row = ctk.CTkFrame(opts, fg_color="transparent")
-        h264_row.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self._h264_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(h264_row, text="Prefer H.264",
-                        variable=self._h264_var,
-                        font=ctk.CTkFont(size=12),
-                        checkbox_width=18, checkbox_height=18).grid(
-            row=0, column=0, padx=(0, 6))
-        ctk.CTkLabel(h264_row, text="(vs. site codec)",
-                     font=ctk.CTkFont(size=11), text_color="gray").grid(
-            row=0, column=1)
+        # ── Save to ───────────────────────────────────────────────────────────
+        self._section_label("Save to", row=5)
 
-        save_row = ctk.CTkFrame(opts, fg_color="transparent")
-        save_row.grid(row=1, column=1, sticky="ew", padx=(16, 0))
+        save_row = ctk.CTkFrame(self, fg_color="transparent")
+        save_row.grid(row=6, column=0, sticky="ew", padx=SIDE_PAD, pady=(0, 18))
         save_row.grid_columnconfigure(0, weight=1)
 
         self._path_lbl = ctk.CTkLabel(
             save_row, text=self._trunc_path(self._save_dir),
-            anchor="w", font=ctk.CTkFont(size=12), text_color="gray")
+            anchor="w", font=ctk.CTkFont(size=13),
+            text_color=COLOR_TEXT)
         self._path_lbl.grid(row=0, column=0, sticky="ew")
 
-        ctk.CTkButton(save_row, text="Browse…", width=80, height=36,
-                      command=self._browse).grid(row=0, column=1, padx=(8, 0))
+        ctk.CTkButton(save_row, text="BROWSE", width=92, height=34, corner_radius=17,
+                      fg_color="transparent", hover_color=COLOR_HOVER,
+                      border_width=1, border_color=COLOR_BORDER_HI,
+                      text_color=COLOR_TEXT,
+                      font=ctk.CTkFont(size=11, weight="bold"),
+                      command=self._browse).grid(row=0, column=1, padx=(10, 0))
 
-        # ── Cookie row ────────────────────────────────────────────────────────
-        cookie_row = ctk.CTkFrame(self, fg_color="transparent")
-        cookie_row.grid(row=3, column=0, sticky="w", pady=(0, 2), **pad)
+        # ── Options ───────────────────────────────────────────────────────────
+        self._section_label("Options", row=7)
 
-        ctk.CTkLabel(cookie_row, text="Cookies from browser:",
-                     font=ctk.CTkFont(size=12), text_color="gray").grid(
-            row=0, column=0, padx=(0, 8))
+        opts = ctk.CTkFrame(self, fg_color="transparent")
+        opts.grid(row=8, column=0, sticky="ew", padx=SIDE_PAD, pady=(0, 0))
+        opts.grid_columnconfigure(0, weight=1)
 
-        self._cookies_var = ctk.StringVar(value="None")
-        ctk.CTkOptionMenu(cookie_row, variable=self._cookies_var,
-                          values=COOKIE_BROWSERS,
-                          width=120, height=30).grid(row=0, column=1)
+        cap_font   = ctk.CTkFont(size=11)
+        label_font = ctk.CTkFont(size=13, weight="bold")
 
-        ctk.CTkLabel(
-            self,
-            text="Use your browser's login to reach private, members-only, or age-restricted videos.",
-            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
-            wraplength=WRAP, justify="left"
-        ).grid(row=4, column=0, sticky="w", pady=(0, 10), **pad)
-
-        # ── Clip row ──────────────────────────────────────────────────────────
-        clip_row = ctk.CTkFrame(self, fg_color="transparent")
-        clip_row.grid(row=5, column=0, sticky="w", pady=(0, 2), **pad)
-
-        self._clip_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(clip_row, text="Clip section",
-                        variable=self._clip_var, command=self._toggle_clip,
-                        font=ctk.CTkFont(size=12),
+        # Prefer H.264
+        self._h264_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="Prefer H.264",
+                        variable=self._h264_var,
+                        font=label_font, text_color=COLOR_TEXT,
+                        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOV,
+                        border_color=COLOR_BORDER_HI,
                         checkbox_width=18, checkbox_height=18).grid(
-            row=0, column=0, padx=(0, 12))
+            row=0, column=0, sticky="w")
+        ctk.CTkLabel(opts,
+            text="Forces AVC video for compatibility with older iPhones, Apple TVs, and smart TVs.",
+            font=cap_font, text_color=COLOR_TEXT,
+            anchor="w", wraplength=CAPTION_WRAP, justify="left").grid(
+            row=1, column=0, sticky="w", padx=(28, 0), pady=(2, 12))
 
+        # Clip section
+        self._clip_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="Clip section",
+                        variable=self._clip_var, command=self._toggle_clip,
+                        font=label_font, text_color=COLOR_TEXT,
+                        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOV,
+                        border_color=COLOR_BORDER_HI,
+                        checkbox_width=18, checkbox_height=18).grid(
+            row=2, column=0, sticky="w")
+        ctk.CTkLabel(opts,
+            text="Download only a portion of the video — leave a field blank to run to the start or end.",
+            font=cap_font, text_color=COLOR_TEXT,
+            anchor="w", wraplength=CAPTION_WRAP, justify="left").grid(
+            row=3, column=0, sticky="w", padx=(28, 0), pady=(2, 6))
+
+        # Clip range entries (revealed by the Clip section toggle)
+        self._clip_row = ctk.CTkFrame(opts, fg_color="transparent")
+        self._clip_row.grid(row=4, column=0, sticky="w", padx=(28, 0), pady=(0, 12))
+
+        ctk.CTkLabel(self._clip_row, text="Start",
+                     font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=COLOR_TEXT).grid(row=0, column=0, padx=(0, 8))
         self._start_var = ctk.StringVar()
         self._start_entry = ctk.CTkEntry(
-            clip_row, textvariable=self._start_var,
-            placeholder_text="Start  e.g. 1:23", width=130, height=28)
-        self._start_entry.grid(row=0, column=1, padx=(0, 8))
+            self._clip_row, textvariable=self._start_var,
+            placeholder_text="1:23", width=110, height=30, corner_radius=15,
+            fg_color=COLOR_INTERACT, border_color=COLOR_INTERACT,
+            text_color=COLOR_TEXT, placeholder_text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12))
+        self._start_entry.grid(row=0, column=1, padx=(0, 20))
 
+        ctk.CTkLabel(self._clip_row, text="End",
+                     font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=COLOR_TEXT).grid(row=0, column=2, padx=(0, 8))
         self._end_var = ctk.StringVar()
         self._end_entry = ctk.CTkEntry(
-            clip_row, textvariable=self._end_var,
-            placeholder_text="End  e.g. 2:45", width=130, height=28)
-        self._end_entry.grid(row=0, column=2)
+            self._clip_row, textvariable=self._end_var,
+            placeholder_text="2:45", width=110, height=30, corner_radius=15,
+            fg_color=COLOR_INTERACT, border_color=COLOR_INTERACT,
+            text_color=COLOR_TEXT, placeholder_text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12))
+        self._end_entry.grid(row=0, column=3)
 
-        self._start_entry.grid_remove()
-        self._end_entry.grid_remove()
+        self._clip_row.grid_remove()
 
-        ctk.CTkLabel(
-            self,
-            text="Download only a portion of the video — leave a field blank to run to the start or end.",
-            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
-            wraplength=WRAP, justify="left"
-        ).grid(row=6, column=0, sticky="w", pady=(0, 10), **pad)
+        # Cookies
+        cookies_row = ctk.CTkFrame(opts, fg_color="transparent")
+        cookies_row.grid(row=5, column=0, sticky="w")
+        ctk.CTkLabel(cookies_row, text="Cookies",
+                     font=label_font, text_color=COLOR_TEXT).grid(
+            row=0, column=0, padx=(0, 12))
 
-        # ── Download button ───────────────────────────────────────────────────
-        self._dl_btn = ctk.CTkButton(
-            self, text="Download", height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            command=self._start_download)
-        self._dl_btn.grid(row=7, column=0, sticky="ew", pady=(0, 10), **pad)
-        self._btn_fg    = self._dl_btn.cget("fg_color")
-        self._btn_hover = self._dl_btn.cget("hover_color")
+        self._cookies_var = ctk.StringVar(value="None")
+        ctk.CTkOptionMenu(cookies_row, variable=self._cookies_var,
+                          values=COOKIE_BROWSERS,
+                          width=110, height=28, corner_radius=14,
+                          fg_color=COLOR_INTERACT,
+                          button_color=COLOR_INTERACT,
+                          button_hover_color=COLOR_HOVER,
+                          dropdown_fg_color=COLOR_SURFACE,
+                          dropdown_hover_color=COLOR_HOVER,
+                          text_color=COLOR_TEXT,
+                          font=ctk.CTkFont(size=12)).grid(row=0, column=1)
 
-        self._progress = ctk.CTkProgressBar(self, height=8, progress_color="#2ecc71")
-        self._progress.set(0)
-        self._progress.grid(row=8, column=0, sticky="ew", pady=(0, 10), **pad)
+        ctk.CTkLabel(opts,
+            text="Use your browser's login to reach private, members-only, or age-restricted videos.",
+            font=cap_font, text_color=COLOR_TEXT,
+            anchor="w", wraplength=CAPTION_WRAP, justify="left").grid(
+            row=6, column=0, sticky="w", padx=(28, 0), pady=(2, 0))
 
-        # Line 1 — filename (wraps naturally at WRAP; no truncation)
-        self._filename_var = ctk.StringVar(value="")
+        # ── Bottom "Now Playing" dock ─────────────────────────────────────────
+        ctk.CTkFrame(self, fg_color=COLOR_DIVIDER, height=1, corner_radius=0).grid(
+            row=11, column=0, sticky="ew")
+
+        dock = ctk.CTkFrame(self, fg_color=COLOR_SURFACE, corner_radius=0, height=DOCK_H)
+        dock.grid(row=12, column=0, sticky="ew")
+        dock.grid_propagate(False)
+        dock.grid_columnconfigure(0, weight=1)
+
+        dock_inner = ctk.CTkFrame(dock, fg_color="transparent")
+        dock_inner.grid(row=0, column=0, sticky="nsew", padx=SIDE_PAD, pady=14)
+        dock_inner.grid_columnconfigure(0, weight=1)
+
+        self._filename_var = ctk.StringVar(value="Ready to download")
         self._filename_lbl = ctk.CTkLabel(
-            self, textvariable=self._filename_var,
-            font=ctk.CTkFont(size=12), text_color="gray",
-            wraplength=WRAP, justify="center")
-        self._filename_lbl.grid(row=9, column=0, padx=SIDE_PAD, pady=(0, 2))
+            dock_inner, textvariable=self._filename_var,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COLOR_TEXT, anchor="w", wraplength=WRAP - 80)
+        self._filename_lbl.grid(row=0, column=0, sticky="ew")
 
-        # Line 2 — speed / ETA / state (always a single short line)
-        self._meta_var = ctk.StringVar(value="Ready")
+        self._progress = ctk.CTkProgressBar(
+            dock_inner, height=4, corner_radius=2,
+            fg_color=COLOR_INTERACT, progress_color=COLOR_ACCENT)
+        self._progress.set(0)
+        self._progress.grid(row=1, column=0, sticky="ew", pady=(6, 4))
+
+        self._meta_var = ctk.StringVar(value="Paste a link to begin")
         self._meta_lbl = ctk.CTkLabel(
-            self, textvariable=self._meta_var,
-            font=ctk.CTkFont(size=12), text_color="gray")
-        self._meta_lbl.grid(row=10, column=0, padx=SIDE_PAD, pady=(0, 16))
+            dock_inner, textvariable=self._meta_var,
+            font=ctk.CTkFont(size=11),
+            text_color=COLOR_TEXT, anchor="w")
+        self._meta_lbl.grid(row=2, column=0, sticky="ew")
+
+        self._dl_btn = ctk.CTkButton(
+            dock_inner, text="▶", width=48, height=48, corner_radius=24,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOV,
+            text_color="#000000",
+            command=self._start_download)
+        self._dl_btn.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(16, 0))
+
+    def _select_quality(self, key: str) -> None:
+        """Update the segmented quality row: highlight the active pill in green."""
+        self._quality_var.set(key)
+        for k, btn in self._quality_btns.items():
+            if k == key:
+                btn.configure(fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOV,
+                              text_color="#000000")
+            else:
+                btn.configure(fg_color=COLOR_INTERACT, hover_color=COLOR_HOVER,
+                              text_color=COLOR_TEXT)
 
     def _toggle_clip(self):
-        """Show or hide the Start/End entry fields when Clip section is toggled."""
+        """Show or hide the Start/End entry row when Clip section is toggled."""
         if self._clip_var.get():
-            self._start_entry.grid()
-            self._end_entry.grid()
+            self._clip_row.grid()
         else:
-            self._start_entry.grid_remove()
-            self._end_entry.grid_remove()
+            self._clip_row.grid_remove()
             self._start_var.set("")
             self._end_var.set("")
 
@@ -330,12 +475,15 @@ class App(ctk.CTk):
         return s if len(s) <= n else "…" + s[-(n - 1):]
 
     def _set_status(self, filename: str = "", meta: str = "", error: bool = False):
-        """Update both status lines. Must be called on the main thread."""
+        """Update both dock status lines. Must be called on the main thread."""
         self._filename_var.set(filename)
         self._meta_var.set(meta)
-        color = "#e74c3c" if error else "gray"
-        self._filename_lbl.configure(text_color=color)
-        self._meta_lbl.configure(text_color=color)
+        if error:
+            self._filename_lbl.configure(text_color=COLOR_DANGER)
+            self._meta_lbl.configure(text_color=COLOR_DANGER)
+        else:
+            self._filename_lbl.configure(text_color=COLOR_TEXT)
+            self._meta_lbl.configure(text_color=COLOR_TEXT)
 
     @staticmethod
     def _validate_url(url: str) -> str | None:
@@ -367,7 +515,7 @@ class App(ctk.CTk):
         """Handle window close: cancel any active download gracefully, then destroy."""
         if self._downloading:
             self._cancel.set()
-            self._dl_btn.configure(text="Closing…", state="disabled")
+            self._dl_btn.configure(text="■", state="disabled")
             self._close_poll_count = 0
             self.after(100, self._wait_and_close)
         else:
@@ -386,7 +534,8 @@ class App(ctk.CTk):
     def _start_download(self):
         if self._downloading:
             self._cancel.set()
-            self._dl_btn.configure(text="Cancelling…", state="disabled")
+            self._dl_btn.configure(text="■", state="disabled")
+            self._set_status(filename=self._filename_var.get(), meta="Cancelling…")
             return
 
         url = self._url_var.get().strip()
@@ -441,11 +590,11 @@ class App(ctk.CTk):
         self._last_saved_path = ""
         self._cancel.clear()
         self._dl_btn.configure(
-            text="Cancel",
-            fg_color=("#c0392b", "#922b21"),
-            hover_color=("#a93226", "#7b241c"))
+            text="■", state="normal",
+            fg_color=COLOR_DANGER,
+            hover_color=COLOR_DANGER_HOV)
         self._progress.set(0)
-        self._set_status(filename="", meta="Starting…")   # Clear previous filename (S3)
+        self._set_status(filename="Preparing…", meta="Starting download")   # Clear previous filename (S3)
 
         log.info("Download started — quality=%s cookies=%s h264=%s clip=%s dest=%s",
                  quality_key, cookies_key, h264, clip_range, save_dir)
@@ -629,31 +778,32 @@ class App(ctk.CTk):
         if saved_name:
             self._set_status(filename=saved_name, meta=f"✓  Saved to {self._save_dir}")
         else:
-            self._set_status(meta=f"✓  Saved to {self._save_dir}")
+            self._set_status(filename="Download complete",
+                             meta=f"✓  Saved to {self._save_dir}")
         log.info("Download complete — file=%s", saved_name or "(unknown)")
         _notify("Download complete",
                 saved_name if saved_name else f"Saved to {self._save_dir}")
 
     def _on_cancelled(self):
         self._reset()
-        self._set_status(meta="Download cancelled.")
+        self._set_status(filename="Ready to download", meta="Download cancelled.")
         log.info("Download cancelled.")
 
     def _on_error(self, msg: str):
         self._reset()
-        self._set_status(meta=f"Error: {msg}", error=True)
+        self._set_status(filename="Download failed", meta=msg, error=True)
 
     def _reset(self):
         self._downloading = False
         self._progress.set(0)   # Return bar to zero on every terminal state (S9)
         self._dl_btn.configure(
-            text="Download", state="normal",
-            fg_color=self._btn_fg,
-            hover_color=self._btn_hover)
+            text="▶", state="normal",
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOV)
 
 
 if __name__ == "__main__":
-    ctk.set_appearance_mode("system")    # Inside __main__ guard — no side effect on import (D9)
-    ctk.set_default_color_theme("blue")
+    # Pinned to dark — the Spotify-inspired palette only works in dark mode (DEC-022).
+    ctk.set_appearance_mode("dark")      # Inside __main__ guard — no side effect on import (D9)
     _setup_logging()
     App().mainloop()

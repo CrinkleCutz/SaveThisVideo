@@ -41,6 +41,7 @@ echo "→ Building app bundle..."
     --collect-all yt_dlp \
     --collect-all curl_cffi \
     --add-binary="${FFMPEG_BIN}:bin" \
+    --add-data="app_icon.png:." \
     --icon=icon.icns \
     app.py
 

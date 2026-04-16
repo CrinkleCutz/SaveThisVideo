@@ -115,3 +115,56 @@
 ## FIX-025 — Re-downloading same video silently overwrote the prior file
 **Fix**: Added `_unique_outtmpl()` helper that sanitizes the title, checks for collision in `save_dir`, and appends ` (1)`, ` (2)`, … until a free name is found. `%` chars in the literal path are escaped to `%%` so yt-dlp does not treat them as template field markers. Refactored `_probe_playlist` → `_probe_info` so the same probe call feeds both playlist detection and title lookup.  
 **File**: `app.py:19, 459-499, 518-527`
+
+## FIX-026 — UI restyle + restructure (DEC-022, DEC-023)
+**Date**: 2026-04-15
+**Fix**: Replaced the flat CTk form with a Spotify-inspired dark UI. Scope:
+- New visual-tokens block (`COLOR_*`) at module top; all hex codes flow through tokens. `ctk.set_appearance_mode("dark")` pinned (previously "system").
+- `_build_ui` rewritten — header strip, four labelled sections (PASTE A LINK / QUALITY / SAVE TO / OPTIONS), clip range revealed by toggle, bottom "Now Playing" dock with circle CTA.
+- Quality `CTkOptionMenu` replaced by segmented 7-pill row + new `_select_quality(key)` state-management method and `QUALITY_SHORT` label map.
+- Download button moved from full-width rectangle to 48×48 circular button inside the dock; glyph/color state machine (▶ green → ■ red → ▶ green) documented in `CLAUDE.md`.
+- Filename + progress + meta relocated into the dock frame.
+- Default `_set_status` colors switched from `"gray"` / `#e74c3c` to `COLOR_TEXT_MUTED` / `COLOR_DANGER`.
+- Paste and Browse buttons restyled as outlined pills (transparent fg, `#7c7c7c` border).
+- Cookies helper text and clip helper text dropped in favor of cleaner section labels.
+- Window grown 580×530 → 620×600; `DOCK_H=92` added.
+- `_toggle_clip` hides/shows the whole `_clip_row` instead of individual entries.
+- `__main__`: dropped `set_default_color_theme("blue")` — all colors explicit now.
+**File**: `app.py` (constants block, `App.__init__`, `_build_ui`, `_select_quality`, `_toggle_clip`, `_set_status`, `_on_close`, `_start_download`, `_reset`, `__main__`)
+
+## FIX-027 — Palette + contrast + option descriptions pass
+**Date**: 2026-04-15
+**Fix**:
+- **All text pure white.** Removed `COLOR_TEXT_MUTED` entirely — every text element now uses `COLOR_TEXT` (`#ffffff`). Hierarchy now comes from weight (bold vs regular) and size (11/12/13/15px), not color.
+- **Inactive pills lighter for contrast.** `COLOR_INTERACT` `#1f1f1f` → `#2d2d2d` and `COLOR_HOVER` `#252525` → `#3a3a3a`. Inactive segmented pills and inputs now clearly separate from the `#121212` page bg.
+- **Accent blue instead of green.** `COLOR_ACCENT` `#1ed760` → `#539df5`, hover `#1db954` → `#3d8ae0`. Applies to active segmented pill, checked checkboxes, progress bar, and circular CTA.
+- **Options section restructured with descriptions.** Was a single horizontal row (H.264 / Clip / Cookies). Now vertically stacked: each option is a bold 13px label on its own line, with a regular 11px single-line description indented beneath. Clip entries sit indented under their caption, still revealed by the toggle.
+- **Window grew** 620×600 → 640×700 to fit the stacked options.
+- **New constant** `CAPTION_WRAP = WRAP - 28` for wrap-bounding captions under their 28px indent.
+**File**: `app.py` (constants block, `_build_ui` options section)
+
+## FIX-028 — Contrast bump + window sizing
+**Date**: 2026-04-15
+**Fix**:
+- Inactive pills lightened further: `COLOR_INTERACT` `#2d2d2d` → `#575757` (~20% move toward white), `COLOR_HOVER` `#3a3a3a` → `#616161`. Segmented pills and inputs now clearly separate from the `#121212` page bg.
+- Window shrunk 700 → 680 → 660. Closes the gap between the Cookies description and the bottom dock.
+**File**: `app.py` (constants block)
+
+## FIX-029 — App icon (source PNG → .icns + runtime iconphoto) — DEC-024
+**Date**: 2026-04-15
+**Fix**:
+- Source: user-supplied `app_icon.png` (1073×1091) committed as the canonical icon asset.
+- `make_icon.py` rewritten — loads `app_icon.png`, pads non-square input to square via `ImageOps.pad` (transparent bars), resamples at all 10 macOS iconset sizes (16/32/64/128/256/512/1024 + @2x), runs `iconutil` → `icon.icns`. Previous procedural film-strip drawing removed.
+- Runtime window icon: new `App._set_window_icon()` in `__init__` loads the PNG via `tk.PhotoImage` and calls `iconphoto(True, ...)`. Best-effort — logs + swallows on failure. On macOS this sets the titlebar / minimized icon (the Dock icon during dev always shows Python).
+- New resolver `_resource_path(name)` returns `sys._MEIPASS/name` when frozen, else `Path(__file__).parent/name`.
+- `build.sh`: added `--add-data="app_icon.png:."` so the packaged `.app` can find the PNG for runtime iconphoto. `--icon=icon.icns` (unchanged) still drives the Dock/Finder icon.
+- `.gitignore`: added `icon.icns` and `icon.iconset/` (both are deterministic outputs of `make_icon.py`).
+**File**: `app.py` (imports, `_bundled_ffmpeg`/`_resource_path`, `App.__init__`, `_set_window_icon`), `make_icon.py` (full rewrite), `build.sh`
+
+## FIX-030 — v1.2 rebrand + window centered on launch
+**Date**: 2026-04-15
+**Fix**:
+- `APP_VERSION` `1.0.0` → `1.2`. New constant `APP_TITLE = "SAVE THIS VIDEO!"`.
+- Window titlebar: `f"{APP_TITLE}  v{APP_VERSION}"`. Header label in the UI shows `APP_TITLE`.
+- Centered on launch: `x = (screenW − WINDOW_W) // 2`, `y = (screenH − WINDOW_H) // 2`, clamped to ≥ 0 via `max(0, ...)`. Previously the window appeared at the OS-default position (often half off-screen at the bottom on macOS).
+**File**: `app.py` (constants, `App.__init__`, `_build_ui` header label)

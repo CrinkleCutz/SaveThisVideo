@@ -1,7 +1,7 @@
 # SaveThisVideo
 
 macOS GUI wrapper around yt-dlp. Single-window app: paste URL, pick quality, download.
-Version: **1.0.0**
+Version: **1.2** — header displays `APP_TITLE = "SAVE THIS VIDEO!"`
 
 ## Stack
 - Python 3.10+
@@ -30,23 +30,48 @@ Single file: `app.py`. One class: `App(ctk.CTk)`.
 - Cancel: sets `threading.Event`; `_hook` raises `_Cancelled` sentinel exception; worker catches it and routes to `_on_cancelled`
 - Window close: `WM_DELETE_WINDOW` → `_on_close()` → sets cancel → polls via `_wait_and_close()` (100ms × max 30 = 3 s) → `destroy()`
 
-## UI Layout
+## UI Layout (Spotify-inspired dark — DEC-022, DEC-023)
 ```
-[Video URL label]
-[URL entry field ──────────────────────────────] [Paste]
-[Quality ▼]  [Save to: ~/Desktop ────────────] [Browse…]
-[☐ Prefer H.264 (vs. site codec)]
-[Cookies from browser: ▼]
-  "Use your browser's login to reach private, members-only, or age-restricted videos."
-[☐ Clip section]   [Start  e.g. 1:23]   [End  e.g. 2:45]    (entries hidden until toggle is on)
-  "Download only a portion of the video — leave a field blank to run to the start or end."
-[Download / Cancel button (full width, 44px)]
-[Progress bar]
-[Filename label — wraps at WRAP=532px]
-[Speed / ETA / state — single line]
+┌──────────────────────────────────────────────────────────┐
+│  SaveThisVideo                                   v1.0.0  │  Header strip
+│                                                          │
+│  PASTE A LINK                                            │  Uppercase muted section labels
+│  [⌕ Paste a link ──────────────────────────] [ PASTE  ]  │  Pill entry + outlined pill
+│                                                          │
+│  QUALITY                                                 │
+│  [BEST][4K][1080p][720p][480p][360p][AUDIO]              │  Segmented pills — active = green
+│                                                          │
+│  SAVE TO                                                 │
+│  ~/Desktop                                   [ BROWSE ]  │
+│                                                          │
+│  OPTIONS                                                 │
+│  ☐ Prefer H.264                                          │
+│     Forces AVC video for compatibility with older …      │  Stacked option rows —
+│  ☐ Clip section                                          │  each control gets a
+│     Download only a portion — leave blank to run to …    │  one-line description
+│     Start [1:23]   End [2:45]                            │  (revealed by Clip toggle)
+│  Cookies [None ▾]                                        │
+│     Use your browser's login to reach private, …         │
+│                                                          │
+├──────────────────────────────────────────────────────────┤  #272727 hairline divider
+│  filename.mp4                                    ┌───┐   │  Dock (#181818 surface)
+│  ▓▓▓▓▓░░░░░░ 45 % • 2.1 MB/s • ETA 0:23          │ ▶ │   │  48×48 circular CTA
+│                                                  └───┘   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-Window: 580×530, fixed size. Layout constants defined at module top: `WINDOW_W`, `SIDE_PAD`, `CTK_LABEL_PAD`, `WRAP`.
+Window: 640×660, fixed size. Layout constants at module top: `WINDOW_W`, `WINDOW_H`, `SIDE_PAD`, `CTK_LABEL_PAD`, `WRAP`, `CAPTION_WRAP`, `DOCK_H`. Visual tokens in a dedicated block: `COLOR_BG` `#121212`, `COLOR_SURFACE` `#181818`, `COLOR_INTERACT` `#575757`, `COLOR_HOVER` `#616161`, `COLOR_ACCENT` `#539df5` (blue), `COLOR_ACCENT_HOV` `#3d8ae0`, `COLOR_DANGER` `#f3727f`, `COLOR_DANGER_HOV` `#e26570`, `COLOR_TEXT` `#ffffff`, `COLOR_DIVIDER` `#272727`, `COLOR_BORDER_HI` `#7c7c7c`. All text is pure white — hierarchy comes from weight/size contrast, not color. Inactive pills at `#575757` are deliberately much lighter than the page background for clear separation.
+
+### Circle CTA states (dock_btn)
+| State       | Text | fg_color          | hover_color         | state      |
+|-------------|------|-------------------|---------------------|------------|
+| Idle        | ▶    | `COLOR_ACCENT`    | `COLOR_ACCENT_HOV`  | normal     |
+| Downloading | ■    | `COLOR_DANGER`    | `COLOR_DANGER_HOV`  | normal     |
+| Cancelling  | ■    | (prev)            | (prev)              | disabled   |
+| Closing     | ■    | (prev)            | (prev)              | disabled   |
+
+### Segmented quality pill row
+`self._quality_btns: dict[str, CTkButton]` — one button per `QUALITY_OPTIONS` key. `_select_quality(key)` updates `self._quality_var` and recolors all seven buttons (active = green fill + black text, inactive = `#1f1f1f` fill + silver text). Short labels in `QUALITY_SHORT` map.
 
 ## Quality Options
 
@@ -134,9 +159,18 @@ Pinned in `requirements.txt`. To upgrade yt-dlp when a site breaks:
 
 ## NOTES
 See `NOTES/` for project history:
-- `decisions.md` — DEC-001 through DEC-021
-- `fixes.md` — FIX-001 through FIX-025
+- `decisions.md` — DEC-001 through DEC-023
+- `fixes.md` — FIX-001 through FIX-026
 - `errors.md` — ERR-001 through ERR-005
+
+## App Icon
+- **Source**: `app_icon.png` (user-supplied; 1073×1091, padded to square at build time)
+- **Runtime window icon**: `App._set_window_icon()` calls `iconphoto(True, tk.PhotoImage(file=...))`. Best-effort, never raises. On macOS this affects titlebar/minimized icon only — the live Dock icon during dev still shows Python.
+- **Bundle icon**: `make_icon.py` loads `app_icon.png`, pads to square, resamples at all 10 required sizes, and runs `iconutil` to produce `icon.icns`. `build.sh` calls `make_icon.py` then passes `--icon=icon.icns` to PyInstaller. `app_icon.png` itself is bundled via `--add-data="app_icon.png:."` so the runtime iconphoto works in the packaged `.app` too.
+- **Resolver**: `_resource_path(name)` returns `sys._MEIPASS/name` when frozen, `Path(__file__).parent/name` otherwise.
+
+## Design System Reference
+`DESIGN.md` documents the Spotify-inspired dark design vocabulary (colors, typography, pill geometry, elevation, do/don'ts). The CTk implementation is a faithful-as-possible translation within tkinter's capabilities — CircularSp fonts, CSS shadows, and uppercase letter-spacing are not available and are accepted as lost. See DEC-022 for the full translation table.
 
 ## CRITICAL Workflow Rule
 NEVER implement code changes before receiving explicit user approval. Generate plan → present → wait → implement.

@@ -118,3 +118,28 @@
 **Why**: Re-downloading the same video would silently overwrite the previous copy. Users expect macOS Finder–style behavior where duplicates get a numbered suffix instead.  
 **Scope**: Only single-video downloads are deduped. Playlists keep the default `%(title)s.%(ext)s` template — per-entry dedup is complex and playlist downloads rarely overlap across sessions.  
 **Refactor**: `_probe_playlist` (returned just the count) replaced with `_probe_info` (returns the full info dict) since both features need the same probe result.
+
+## DEC-022 — Spotify-inspired dark UI restructure
+**Date**: 2026-04-15
+**Decision**: Full visual + structural redesign based on `DESIGN.md`. Window pinned to dark mode, page background `#121212`, named color tokens for every surface, text, and state. Typography drops the old gray-everywhere pattern for a bold/regular hierarchy in `#ffffff` + `#b3b3b3`. Layout adopts Spotify's uppercase section-label voice ("PASTE A LINK", "QUALITY", "SAVE TO", "OPTIONS") above each row.
+**Why**: The previous UI was a functional but undifferentiated CTk form. Borrowing Spotify's vocabulary (dark immersion, green functional accent, pill geometry, systematic labels) gives the app a recognizable identity without changing any behavior.
+**Translation losses (CTk ceiling)**: no CircularSp fonts (use system fallback), no CSS box-shadow (substitute via `#181818` dock surface + 1px `#272727` divider), no uppercase letter-spacing (accept loss, rely on weight contrast).
+**Tokens**: Defined once at module top — `COLOR_BG`, `COLOR_SURFACE`, `COLOR_INTERACT`, `COLOR_HOVER`, `COLOR_ACCENT`, `COLOR_ACCENT_HOV`, `COLOR_DANGER`, `COLOR_DANGER_HOV`, `COLOR_TEXT`, `COLOR_TEXT_MUTED`, `COLOR_DIVIDER`, `COLOR_BORDER_HI`. Never hardcode hex elsewhere.
+**Rule**: Spotify Green is *functional only* — CTA button, progress bar, active segmented pill, checked checkbox fill. Never decorative.
+**Window**: Grown from 580×530 to 620×600 to fit the segmented quality row (7 pills) and bottom dock.
+
+## DEC-023 — Segmented quality pills + "Now Playing" dock pattern
+**Date**: 2026-04-15
+**Decision**: Two structural changes on top of the reskin:
+1. **Quality dropdown → 7-pill segmented row.** `QUALITY_SHORT` maps full keys to short labels ("BEST", "4K", "1080p", …, "AUDIO"). `self._quality_btns` holds one `CTkButton` per key; `_select_quality(key)` sets `self._quality_var` and recolors all seven — active pill = `#1ed760` fill + black text, inactive = `#1f1f1f` fill + `#b3b3b3` text.
+2. **Download CTA → circular button in a persistent bottom dock.** Dock is a `#181818` frame at the bottom of the window (fixed `DOCK_H=92`, separated from content by a 1px `#272727` divider). Dock contains: filename (bold white), progress bar (green on dark track), meta (silver), and a 48×48 circular button on the right (`corner_radius=24`). Button glyph is ▶ idle, ■ downloading, ▶ after cancel/done. The CTA moves out of the form flow and into a dedicated "player" dock, matching Spotify's persistent player strip.
+**Why**: The segmented row removes the dropdown-then-pick interaction for the most-touched control — 7 quality choices visible + one click. The dock gives the download operation a persistent "player" identity and keeps the primary action anchored regardless of form scroll / options expansion.
+**State machine** documented in `CLAUDE.md` under "Circle CTA states".
+**Tradeoff**: Segmented row needs explicit state-management code (~25 lines of `_select_quality` + dict). At 620px window width the 7 pills are ~78px each — tight but legible with the short label map.
+
+## DEC-024 — App icon pipeline: single PNG source → everywhere
+**Date**: 2026-04-15
+**Decision**: `app_icon.png` is the single source of truth for every icon surface. `make_icon.py` loads the PNG, pads to square if non-square, and resamples at all 10 macOS iconset sizes, then calls `iconutil` to produce `icon.icns`. At runtime, `App._set_window_icon()` loads the same PNG via `tk.PhotoImage` for the Tk window iconphoto. PyInstaller bundles both: `--icon=icon.icns` for the Dock/Finder icon and `--add-data="app_icon.png:."` for the runtime iconphoto inside the packaged `.app`. A new `_resource_path(name)` resolver returns `sys._MEIPASS/name` when frozen, `Path(__file__).parent/name` otherwise — used for every bundled asset.
+**Why**: Replacing the previous procedural film-strip icon with a user-supplied design. A single PNG source keeps the Finder, Dock, titlebar, and minimized-window icons consistent — no per-surface edits. Deterministic regeneration (`make_icon.py` is idempotent) means `.icns` and `icon.iconset/` are build artifacts and are `.gitignore`'d; only `app_icon.png` is tracked.
+**macOS nuance**: During dev (running from source), Tk's `iconphoto()` does **not** update the running process's Dock icon — that always shows Python. Only the distributed `.app` bundle gets the real icon in the Dock, via the `--icon=icon.icns` flag. Accept this as a macOS limitation.
+**Tracked vs generated**: `app_icon.png` and `make_icon.py` are tracked; `icon.icns` and `icon.iconset/` are regenerated on every build and gitignored.
